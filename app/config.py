@@ -23,11 +23,11 @@ _env_path = BASE_DIR / ".env"
 load_dotenv(dotenv_path=_env_path, override=True)
 
 # ── Load Streamlit secrets (Cloud deployment) ─────────────────────────────────
-# Streamlit secrets are NOT in os.environ by default — we copy them in manually.
 try:
     import streamlit as st
-    if hasattr(st, "secrets") and len(st.secrets) > 0:
+    if hasattr(st, "secrets"):
         for _k, _v in st.secrets.items():
+            # Skip nested sections (e.g. [database] tables) — only load flat strings
             if isinstance(_v, str) and _k not in os.environ:
                 os.environ[_k] = _v
 except Exception:
