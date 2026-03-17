@@ -6,6 +6,14 @@ keyboard shortcuts, typing indicator, and polished empty states.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# Ensure repo root is on sys.path (needed for Streamlit Cloud)
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 import html
 import re
 import streamlit as st
