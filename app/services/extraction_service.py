@@ -1,7 +1,15 @@
 """
 extraction_service.py - PDF text extraction, section detection, and intelligent chunking.
-Uses PyMuPDF (fitz) for extraction and regex-based section detection.
+
+Key improvements over previous version:
+- Sentence-aware chunking (never splits mid-sentence)
+- Smarter section detection (numbered headings, bold-style ALL CAPS)
+- Better PDF text cleaning (handles ligatures, unicode noise, column artefacts)
+- Author extraction from first page text when PDF metadata is empty
+- Abstract pulled from first-page content even without a heading
 """
+
+from __future__ import annotations
 
 import re
 import uuid
@@ -28,70 +36,54 @@ from app.utils.logger import get_logger, ServiceLogger
 logger = get_logger(__name__)
 
 
-# ── Extraction Service ────────────────────────────────────────────────────────
-
 class ExtractionService:
     """
     Responsible for:
     1. Extracting full text from PDFs page by page
     2. Detecting standard research paper sections
-    3. Chunking text intelligently with overlap
+    3. Chunking text with sentence-awareness and overlap
     4. Populating DocumentMetadata
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._section_patterns = self._compile_section_patterns()
         logger.info("ExtractionService initialised")
 
-    # ── Main Entry Point ──────────────────────────────────────────────────────
+    # ── Main entry point ──────────────────────────────────────────────────────
 
     def process(self, doc: ProcessedDocument) -> ProcessedDocument:
-        """
-        Runs the full extraction pipeline on a ProcessedDocument.
-        Mutates and returns the document with:
-        - full_text populated
-        - metadata populated
-        - sections detected
-        - chunks generated
-        - status updated to EXTRACTED
-
-        Args:
-            doc: ProcessedDocument with UPLOADED status.
-
-        Returns:
-            Updated ProcessedDocument.
-        """
         slog = ServiceLogger("extraction_service", doc_id=doc.doc_id)
-        slog.info(f"Starting extraction for '{doc.filename}'")
+        slog.info("Starting extraction for '%s'", doc.filename)
 
         try:
             doc.status = DocumentStatus.EXTRACTING
 
-            # Step 1 — Extract raw text + metadata
+            # 1 — Extract text + metadata
             pages_text, metadata = self._extract_from_pdf(doc.file_path, slog)
             doc.full_text = "\n\n".join(pages_text)
             doc.metadata  = metadata
             slog.info(
-                f"Extracted {metadata.page_count} pages, "
-                f"{metadata.word_count:,} words"
+                "Extracted %d pages, %d words",
+                metadata.page_count, metadata.word_count,
             )
 
-            # Step 2 — Detect sections
+            # 2 — Detect sections
             doc.sections = self._detect_sections(doc.full_text, pages_text, slog)
             slog.info(
-                f"Detected {len(doc.sections)} sections: "
-                f"{[s.section_type.value for s in doc.sections]}"
+                "Detected %d sections: %s",
+                len(doc.sections),
+                [s.section_type.value for s in doc.sections],
             )
 
-            # Step 3 — Chunk text
+            # 3 — Chunk
             doc.chunks      = self._chunk_document(doc, slog)
             doc.chunk_count = len(doc.chunks)
-            slog.info(f"Generated {doc.chunk_count} chunks")
+            slog.info("Generated %d chunks", doc.chunk_count)
 
-            # Step 4 — Pull abstract into metadata if found
-            abstract_section = doc.get_section(SectionType.ABSTRACT)
-            if abstract_section:
-                doc.metadata.abstract = abstract_section.content[:1000]
+            # 4 — Pull abstract into metadata
+            abstract = doc.get_section(SectionType.ABSTRACT)
+            if abstract:
+                doc.metadata.abstract = abstract.content[:1500]
 
             doc.status = DocumentStatus.EXTRACTED
             slog.info("Extraction complete ✓")
@@ -99,116 +91,98 @@ class ExtractionService:
         except Exception as e:
             doc.status        = DocumentStatus.FAILED
             doc.error_message = str(e)
-            slog.error(f"Extraction failed: {e}", exc_info=True)
+            slog.error("Extraction failed: %s", e)
 
         return doc
 
-    # ── PDF Extraction ────────────────────────────────────────────────────────
+    # ── PDF extraction ────────────────────────────────────────────────────────
 
     def _extract_from_pdf(
         self,
-        file_path: str,
-        slog: ServiceLogger,
+        file_path : str,
+        slog      : ServiceLogger,
     ) -> tuple[list[str], DocumentMetadata]:
-        """
-        Opens the PDF with PyMuPDF and extracts:
-        - Text per page (list of strings)
-        - DocumentMetadata (title, authors, page count etc.)
-
-        Args:
-            file_path: Absolute path to the PDF.
-            slog:      ServiceLogger for this document.
-
-        Returns:
-            (pages_text, DocumentMetadata)
-        """
-        pages_text: list[str] = []
-        total_words = 0
 
         pdf_path = Path(file_path)
         if not pdf_path.exists():
             raise FileNotFoundError(f"PDF not found: {file_path}")
 
+        pages_text : list[str] = []
+        total_words = 0
+
         with fitz.open(str(pdf_path)) as pdf:
             page_count = len(pdf)
-            slog.debug(f"Opened PDF — {page_count} pages")
-
-            # Extract metadata from PDF properties
             raw_meta   = pdf.metadata or {}
-            title      = raw_meta.get("title", "").strip()
-            author_str = raw_meta.get("author", "").strip()
-            created    = raw_meta.get("creationDate", "").strip()
+            title      = (raw_meta.get("title") or "").strip()
+            author_str = (raw_meta.get("author") or "").strip()
+            created    = (raw_meta.get("creationDate") or "").strip()
 
-            # Extract text page by page
             for page_num in range(page_count):
                 page = pdf[page_num]
-                text = page.get_text("text")  # plain text extraction
-
-                # Basic cleanup
+                text = page.get_text("text")
                 text = self._clean_page_text(text)
                 pages_text.append(text)
                 total_words += len(text.split())
 
-            # Try to extract title from first page if not in metadata
-            if not title and pages_text:
+            # Better title: try first-page lines if metadata is empty or generic
+            if (not title or len(title) < 8) and pages_text:
                 title = self._extract_title_from_text(pages_text[0])
 
-            # Parse authors
+            # Authors from metadata or first-page heuristic
             authors = self._parse_authors(author_str)
+            if not authors and pages_text:
+                authors = self._extract_authors_from_text(pages_text[0], title)
 
-        file_size = pdf_path.stat().st_size
-        metadata  = DocumentMetadata(
+        metadata = DocumentMetadata(
             title           = title,
             authors         = authors,
             page_count      = page_count,
             word_count      = total_words,
             created_at      = created,
-            file_size_bytes = file_size,
+            file_size_bytes = pdf_path.stat().st_size,
         )
 
+        slog.info("Metadata — title='%s' authors=%s", title[:60], authors[:3])
         return pages_text, metadata
 
-    # ── Section Detection ─────────────────────────────────────────────────────
+    # ── Section detection ─────────────────────────────────────────────────────
 
     def _detect_sections(
         self,
-        full_text: str,
-        pages_text: list[str],
-        slog: ServiceLogger,
+        full_text  : str,
+        pages_text : list[str],
+        slog       : ServiceLogger,
     ) -> list[DocumentSection]:
-        """
-        Scans the full text for section headings using keyword patterns.
-        Assigns content between consecutive headings to each section.
 
-        Returns:
-            List of DocumentSection objects, ordered by appearance.
-        """
-        sections: list[DocumentSection] = []
-        lines    = full_text.split("\n")
-        hits: list[tuple[int, SectionType, str]] = []  # (line_index, type, heading)
+        lines = full_text.split("\n")
+        hits  : list[tuple[int, SectionType, str]] = []
 
         for i, line in enumerate(lines):
             stripped = line.strip()
-            if not stripped or len(stripped) > 120:
+            if not stripped:
                 continue
-
+            # Skip very long lines (body text, not headings)
+            if len(stripped) > 150:
+                continue
             section_type = self._classify_heading(stripped)
             if section_type:
+                # Avoid duplicate consecutive hits for the same type
+                if hits and hits[-1][1] == section_type and i - hits[-1][0] < 3:
+                    continue
                 hits.append((i, section_type, stripped))
 
-        slog.debug(f"Found {len(hits)} section headings")
+        slog.debug("Found %d section headings", len(hits))
 
-        # Build sections from hits — content = text between this heading and next
+        sections: list[DocumentSection] = []
+
         for idx, (line_idx, section_type, heading) in enumerate(hits):
-            start_line = line_idx + 1
-            end_line   = hits[idx + 1][0] if idx + 1 < len(hits) else len(lines)
-
-            content = "\n".join(lines[start_line:end_line]).strip()
+            start = line_idx + 1
+            end   = hits[idx + 1][0] if idx + 1 < len(hits) else len(lines)
+            content = "\n".join(lines[start:end]).strip()
 
             if len(content) < MIN_CHUNK_LENGTH:
                 continue
 
-            # Approximate page numbers
             chars_before = len("\n".join(lines[:line_idx]))
             page_start   = self._estimate_page(chars_before, pages_text)
 
@@ -224,7 +198,7 @@ class ExtractionService:
                 )
             )
 
-        # If no sections detected, treat the whole document as OTHER
+        # Fallback: no sections found — treat whole doc as OTHER
         if not sections:
             slog.warning("No sections detected — treating full text as single section")
             sections.append(
@@ -241,25 +215,18 @@ class ExtractionService:
 
     def _chunk_document(
         self,
-        doc: ProcessedDocument,
-        slog: ServiceLogger,
+        doc  : ProcessedDocument,
+        slog : ServiceLogger,
     ) -> list[TextChunk]:
-        """
-        Chunks the document in two passes:
-        1. Section-aware: chunk each detected section separately
-           so section boundaries are never crossed.
-        2. Falls back to chunking full_text if no sections found.
 
-        Each chunk has CHUNK_OVERLAP words carried over from the
-        previous chunk to preserve context across boundaries.
-
-        Returns:
-            Flat list of TextChunk objects with sequential chunk_index.
-        """
         chunks: list[TextChunk] = []
 
-        if doc.sections and doc.sections[0].section_type != SectionType.OTHER:
-            # Section-aware chunking
+        has_real_sections = (
+            doc.sections
+            and doc.sections[0].section_type != SectionType.OTHER
+        )
+
+        if has_real_sections:
             for section in doc.sections:
                 section_chunks = self._chunk_text(
                     text         = section.content,
@@ -269,52 +236,76 @@ class ExtractionService:
                 )
                 chunks.extend(section_chunks)
         else:
-            # Fallback — chunk full text
             chunks = self._chunk_text(
                 text         = doc.full_text,
                 doc_id       = doc.doc_id,
                 section_type = SectionType.OTHER,
             )
 
-        # Assign global sequential indices
-        total = len(chunks)
         for i, chunk in enumerate(chunks):
             chunk.chunk_index  = i
-            chunk.total_chunks = total
+            chunk.total_chunks = len(chunks)
 
-        slog.debug(f"Chunked into {total} chunks "
-                   f"(size={CHUNK_SIZE}, overlap={CHUNK_OVERLAP})")
+        slog.debug(
+            "Chunked into %d chunks (size=%d, overlap=%d)",
+            len(chunks), CHUNK_SIZE, CHUNK_OVERLAP,
+        )
         return chunks
 
     def _chunk_text(
         self,
-        text        : str,
-        doc_id      : str,
-        section_type: SectionType = SectionType.OTHER,
-        page_number : int = 0,
+        text         : str,
+        doc_id       : str,
+        section_type : SectionType = SectionType.OTHER,
+        page_number  : int = 0,
     ) -> list[TextChunk]:
         """
-        Splits text into overlapping word-based chunks.
+        Sentence-aware sliding-window chunker.
 
-        Args:
-            text:         Text to chunk.
-            doc_id:       Parent document ID.
-            section_type: Section this text belongs to.
-            page_number:  Approximate page number.
-
-        Returns:
-            List of TextChunk objects.
+        Splits by sentence boundaries first, then groups sentences
+        into CHUNK_SIZE-word windows with CHUNK_OVERLAP-word carry-over.
+        This ensures chunks are always coherent units of thought.
         """
-        words  = text.split()
-        chunks : list[TextChunk] = []
-        start  = 0
+        # Split into sentences
+        sentences = self._split_sentences(text)
+        if not sentences:
+            return []
 
-        while start < len(words):
-            end        = min(start + CHUNK_SIZE, len(words))
-            chunk_words = words[start:end]
-            chunk_text  = " ".join(chunk_words)
+        chunks      : list[TextChunk] = []
+        current     : list[str]       = []
+        current_len : int             = 0
 
-            if len(chunk_text.strip()) >= MIN_CHUNK_LENGTH:
+        for sent in sentences:
+            sent_words = len(sent.split())
+
+            # If adding this sentence would exceed limit, flush current window
+            if current_len + sent_words > CHUNK_SIZE and current:
+                chunk_text = " ".join(current).strip()
+                if len(chunk_text) >= MIN_CHUNK_LENGTH:
+                    chunks.append(
+                        TextChunk(
+                            chunk_id     = str(uuid.uuid4()),
+                            doc_id       = doc_id,
+                            content      = chunk_text,
+                            section_type = section_type,
+                            page_number  = page_number,
+                        )
+                    )
+
+                # Carry over overlap words from end of current window
+                overlap_text  = " ".join(current)
+                overlap_words = overlap_text.split()
+                carry         = overlap_words[-CHUNK_OVERLAP:] if len(overlap_words) > CHUNK_OVERLAP else overlap_words
+                current       = [" ".join(carry)]
+                current_len   = len(carry)
+
+            current.append(sent)
+            current_len += sent_words
+
+        # Flush the final window
+        if current:
+            chunk_text = " ".join(current).strip()
+            if len(chunk_text) >= MIN_CHUNK_LENGTH:
                 chunks.append(
                     TextChunk(
                         chunk_id     = str(uuid.uuid4()),
@@ -325,42 +316,86 @@ class ExtractionService:
                     )
                 )
 
-            if end >= len(words):
-                break
-
-            # Move forward by CHUNK_SIZE - CHUNK_OVERLAP (sliding window)
-            start += max(1, CHUNK_SIZE - CHUNK_OVERLAP)
-
         return chunks
 
-    # ── Text Cleaning ─────────────────────────────────────────────────────────
+    # ── Text cleaning ─────────────────────────────────────────────────────────
 
     @staticmethod
     def _clean_page_text(text: str) -> str:
         """
-        Cleans raw text extracted from a PDF page:
-        - Removes hyphenated line breaks (re-joins split words)
-        - Collapses excessive whitespace
+        Production-grade PDF text cleanup:
+        - Re-joins hyphenated line breaks
+        - Fixes ligatures (ﬁ→fi, ﬀ→ff etc.)
+        - Removes page headers/footers (short isolated lines with numbers)
+        - Collapses whitespace
         - Removes non-printable characters
         """
-        # Re-join hyphenated words at line breaks
+        # Fix common PDF ligature encoding issues
+        ligatures = {
+            "\ufb01": "fi", "\ufb02": "fl", "\ufb00": "ff",
+            "\ufb03": "ffi", "\ufb04": "ffl", "\u2019": "'",
+            "\u2018": "'", "\u201c": '"', "\u201d": '"',
+            "\u2013": "-", "\u2014": "--",
+        }
+        for bad, good in ligatures.items():
+            text = text.replace(bad, good)
+
+        # Re-join hyphenated line-break words (e.g. "cogni-\ntive" → "cognitive")
         text = re.sub(r"(\w)-\n(\w)", r"\1\2", text)
+
+        # Remove non-printable characters, keep newlines and standard ASCII
+        text = re.sub(r"[^\x20-\x7E\n]", " ", text)
+
+        # Collapse 3+ consecutive newlines to 2
+        text = re.sub(r"\n{3,}", "\n\n", text)
+
         # Collapse multiple spaces
         text = re.sub(r" {2,}", " ", text)
-        # Remove non-printable characters (keep newlines)
-        text = re.sub(r"[^\x20-\x7E\n]", " ", text)
-        # Collapse more than 2 consecutive newlines
-        text = re.sub(r"\n{3,}", "\n\n", text)
+
         return text.strip()
 
-    # ── Heading Classification ────────────────────────────────────────────────
+    # ── Sentence splitter ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def _split_sentences(text: str) -> list[str]:
+        """
+        Lightweight sentence splitter that handles:
+        - Abbreviations (Mr., Dr., et al., Fig., vs.)
+        - Decimal numbers (3.14)
+        - Section numbers (2.1, 3.4.1)
+        Returns a flat list of sentence strings.
+        """
+        # Common abbreviations that contain periods but aren't sentence ends
+        abbrevs = r"(?:Mr|Mrs|Dr|Prof|Fig|Tab|Eq|Sec|Vol|No|pp|et al|vs|i\.e|e\.g|cf|approx|avg)"
+
+        # Split on sentence-ending punctuation followed by whitespace + capital
+        # but NOT on abbreviations or decimals
+        pattern = re.compile(
+            r"(?<!\b" + abbrevs + r")"   # not after abbreviation
+            r"(?<!\d)"                    # not after digit (decimal)
+            r"(?<=[.!?])"                 # preceded by sentence-end punctuation
+            r"\s+"                        # whitespace
+            r"(?=[A-Z\[\(])",             # followed by capital or bracket
+        )
+        parts = pattern.split(text)
+        # Strip and remove empties
+        return [s.strip() for s in parts if s.strip() and len(s.strip()) > 5]
+
+    # ── Heading classifier ────────────────────────────────────────────────────
 
     def _classify_heading(self, line: str) -> SectionType | None:
         """
-        Returns the SectionType if the line looks like a section heading,
-        otherwise returns None.
+        Returns SectionType if line looks like a section heading.
+
+        Accepts:
+        - "Abstract", "1. Introduction", "2.1 Methods"
+        - "RESULTS AND DISCUSSION" (all caps)
+        - "References" (standalone)
         """
         normalized = line.lower().strip().rstrip(".")
+
+        # Strip leading numbering like "1.", "2.1", "3.4.2"
+        normalized = re.sub(r"^\d+(\.\d+)*\.?\s+", "", normalized)
 
         for section_type, pattern in self._section_patterns.items():
             if pattern.search(normalized):
@@ -369,71 +404,102 @@ class ExtractionService:
         return None
 
     def _compile_section_patterns(self) -> dict[SectionType, re.Pattern]:
-        """
-        Compiles regex patterns from SECTION_KEYWORDS in config.
-        Each keyword becomes a word-boundary pattern.
-        """
-        patterns: dict[SectionType, re.Pattern] = {}
-
         type_map = {
-            "abstract"     : SectionType.ABSTRACT,
-            "introduction" : SectionType.INTRODUCTION,
-            "methods"      : SectionType.METHODS,
-            "results"      : SectionType.RESULTS,
-            "discussion"   : SectionType.DISCUSSION,
-            "conclusion"   : SectionType.CONCLUSION,
-            "references"   : SectionType.REFERENCES,
+            "abstract"    : SectionType.ABSTRACT,
+            "introduction": SectionType.INTRODUCTION,
+            "methods"     : SectionType.METHODS,
+            "results"     : SectionType.RESULTS,
+            "discussion"  : SectionType.DISCUSSION,
+            "conclusion"  : SectionType.CONCLUSION,
+            "references"  : SectionType.REFERENCES,
         }
-
+        patterns: dict[SectionType, re.Pattern] = {}
         for key, section_type in type_map.items():
             keywords = SECTION_KEYWORDS.get(key, [])
             if not keywords:
                 continue
-            # Build alternation pattern, escape special chars
             alts    = "|".join(re.escape(kw) for kw in keywords)
-            pattern = re.compile(rf"(?:^|\s)({alts})(?:\s|$|:)", re.IGNORECASE)
+            pattern = re.compile(
+                rf"(?:^|\b)({alts})(?:\b|$|:|\s)",
+                re.IGNORECASE,
+            )
             patterns[section_type] = pattern
-
         return patterns
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
+    # ── Metadata helpers ──────────────────────────────────────────────────────
 
     @staticmethod
     def _extract_title_from_text(first_page: str) -> str:
         """
-        Heuristic: the title is often the first non-empty line of the
-        first page that is longer than 10 characters.
+        Heuristic title extraction from first page:
+        Takes the first line > 15 chars that doesn't look like
+        a date, URL, page number, or single word.
         """
         for line in first_page.split("\n"):
-            stripped = line.strip()
-            if len(stripped) > 10:
-                return stripped[:200]
+            s = line.strip()
+            if len(s) < 15:
+                continue
+            if re.match(r"^\d+$", s):
+                continue     # pure number
+            if re.match(r"https?://", s):
+                continue     # URL
+            if s.count(" ") == 0:
+                continue     # single word
+            return s[:200]
         return ""
 
     @staticmethod
+    def _extract_authors_from_text(first_page: str, title: str) -> list[str]:
+        """
+        Heuristic: authors often appear on lines 2–10 of the first page,
+        immediately after the title, containing comma-separated proper names.
+        Returns up to 8 author names.
+        """
+        lines     = [l.strip() for l in first_page.split("\n") if l.strip()]
+        candidates: list[str] = []
+
+        title_found = False
+        for line in lines:
+            if not title_found:
+                if title and title[:30].lower() in line.lower():
+                    title_found = True
+                continue
+
+            # Stop at lines that look like institution names, dates, emails, abstracts
+            lower = line.lower()
+            if any(kw in lower for kw in [
+                "university", "institute", "department", "abstract",
+                "email", "@", "http", "received", "accepted",
+            ]):
+                break
+
+            # Lines with 2–6 proper names (capital letters) separated by commas
+            parts = [p.strip() for p in re.split(r"[,;]", line) if p.strip()]
+            proper = [p for p in parts if re.match(r"^[A-Z][a-z]", p)]
+
+            if len(proper) >= 2:
+                candidates.extend(proper[:6])
+                if len(candidates) >= 8:
+                    break
+
+        return candidates[:8]
+
+    @staticmethod
     def _parse_authors(author_str: str) -> list[str]:
-        """
-        Splits an author string by common delimiters.
-        e.g. "John Smith; Jane Doe, PhD" → ["John Smith", "Jane Doe", "PhD"]
-        """
         if not author_str:
             return []
         parts = re.split(r"[;,&]+", author_str)
-        return [p.strip() for p in parts if p.strip()]
+        return [p.strip() for p in parts if p.strip() and len(p.strip()) > 2]
 
     @staticmethod
     def _estimate_page(char_offset: int, pages_text: list[str]) -> int:
-        """
-        Estimates the page number for a given character offset
-        by accumulating page lengths.
-        """
         cumulative = 0
-        for i, page_text in enumerate(pages_text):
-            cumulative += len(page_text)
+        for i, page in enumerate(pages_text):
+            cumulative += len(page)
             if char_offset <= cumulative:
                 return i
         return len(pages_text) - 1
 
 
-# ── Module-level singleton ────────────────────────────────────────────────────
+# ── Singleton ─────────────────────────────────────────────────────────────────
 extraction_service = ExtractionService()

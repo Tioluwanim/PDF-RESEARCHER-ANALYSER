@@ -6205,3 +6205,71 @@ Bad request:
 2026-03-17 19:46:59 | INFO     | ai_router:195 | [f3385c11-1093-4d08-b1cb-b9c681028753] Chat — stream=True  q='What is this paper about'
 2026-03-17 19:46:59 | INFO     | ai_router:195 | [f3385c11-1093-4d08-b1cb-b9c681028753] Streaming via OpenRouter (openrouter/free) …
 2026-03-17 19:47:13 | INFO     | ai_router:195 | [f3385c11-1093-4d08-b1cb-b9c681028753] OpenRouter stream done — 4 tokens
+2026-03-17 19:58:57 | INFO     | app.services.pdf_service:44 | PDFService initialised
+2026-03-17 19:58:57 | INFO     | app.services.extraction_service:44 | ExtractionService initialised
+2026-03-17 19:59:27 | INFO     | app.services.pdf_service:44 | PDFService initialised
+2026-03-17 19:59:27 | INFO     | app.services.extraction_service:44 | ExtractionService initialised
+2026-03-17 20:01:07 | INFO     | app.services.embedding_service:41 | EmbeddingService ready (model will load on first use)
+2026-03-17 20:01:07 | INFO     | app.services.rag_service:52 | RAGService initialised
+2026-03-17 20:01:07 | INFO     | app.services.ai_router:101 | AIRouter ready — OR model=openrouter/free  HF model=meta-llama/Llama-3.1-8B-Instruct:cerebras  HF url=https://router.huggingface.co/v1
+2026-03-17 20:01:07 | INFO     | app.services.analysis_service:33 | AnalysisService initialised
+2026-03-17 20:01:07 | INFO     | startup:153 | ============================================================
+2026-03-17 20:01:07 | INFO     | startup:154 |   PDF Research Analyzer v1.0.0 starting up
+2026-03-17 20:01:07 | INFO     | startup:155 | ============================================================
+2026-03-17 20:01:07 | INFO     | startup:158 |   app_title                      PDF Research Analyzer
+2026-03-17 20:01:07 | INFO     | startup:158 |   version                        1.0.0
+2026-03-17 20:01:07 | INFO     | startup:158 |   debug                          False
+2026-03-17 20:01:07 | INFO     | startup:158 |   log_level                      INFO
+2026-03-17 20:01:07 | INFO     | startup:158 |   openrouter_model               openrouter/free
+2026-03-17 20:01:07 | INFO     | startup:158 |   openrouter_configured          True
+2026-03-17 20:01:07 | INFO     | startup:158 |   huggingface_model              meta-llama/Llama-3.1-8B-Instruct:cerebras
+2026-03-17 20:01:07 | INFO     | startup:158 |   huggingface_configured         True
+2026-03-17 20:01:07 | INFO     | startup:158 |   huggingface_base_url           https://router.huggingface.co/v1
+2026-03-17 20:01:07 | INFO     | startup:158 |   embedding_model                sentence-transformers/all-MiniLM-L6-v2
+2026-03-17 20:01:07 | INFO     | startup:158 |   embedding_dimension            384
+2026-03-17 20:01:07 | INFO     | startup:158 |   chunk_size                     500
+2026-03-17 20:01:07 | INFO     | startup:158 |   chunk_overlap                  50
+2026-03-17 20:01:07 | INFO     | startup:158 |   similarity_threshold           0.1
+2026-03-17 20:01:07 | INFO     | startup:158 |   top_k_results                  5
+2026-03-17 20:01:07 | INFO     | startup:158 |   max_file_size_mb               50
+2026-03-17 20:01:07 | INFO     | startup:158 |   upload_dir                     C:\Users\ADMIN\PycharmProjects\pdf_analyzer\data\uploads
+2026-03-17 20:01:07 | INFO     | startup:158 |   processed_dir                  C:\Users\ADMIN\PycharmProjects\pdf_analyzer\data\processed
+2026-03-17 20:01:07 | INFO     | startup:158 |   vectorstore_dir                C:\Users\ADMIN\PycharmProjects\pdf_analyzer\data\vectorstore
+2026-03-17 20:01:07 | INFO     | startup:160 | ------------------------------------------------------------
+2026-03-17 20:01:07 | INFO     | startup:166 |   ✓  Config validation passed — no warnings
+2026-03-17 20:01:07 | INFO     | startup:168 |   ✓  Log file: C:\Users\ADMIN\PycharmProjects\pdf_analyzer\logs\app_2026-03-17.log
+2026-03-17 20:01:07 | INFO     | startup:169 | ============================================================
+2026-03-17 20:21:47 | INFO     | rag_service:195 | [f3385c11-1093-4d08-b1cb-b9c681028753] Index loaded from disk — 9 vectors, 9 chunks
+2026-03-17 20:21:53 | INFO     | analysis_service:195 | [f3385c11-1093-4d08-b1cb-b9c681028753] Chat stream — 'What is this paper about?'
+2026-03-17 20:21:53 | INFO     | app.services.embedding_service:48 | Loading embedding model 'sentence-transformers/all-MiniLM-L6-v2' …
+2026-03-17 20:22:02 | INFO     | app.services.embedding_service:60 | Embedding model loaded ✓  dim=384
+2026-03-17 20:22:02 | INFO     | rag_service:195 | [f3385c11-1093-4d08-b1cb-b9c681028753] Search complete — 0/5 results above threshold=0.1 in 9068.8ms
+2026-03-17 20:22:02 | INFO     | ai_router:195 | [f3385c11-1093-4d08-b1cb-b9c681028753] Chat — stream=True  q='What is this paper about?'
+2026-03-17 20:22:02 | INFO     | ai_router:195 | [f3385c11-1093-4d08-b1cb-b9c681028753] Streaming via OpenRouter (openrouter/free) …
+2026-03-17 20:22:26 | INFO     | ai_router:195 | [f3385c11-1093-4d08-b1cb-b9c681028753] OpenRouter stream done — 4 tokens
+2026-03-17 20:28:10 | INFO     | startup:153 | ============================================================
+2026-03-17 20:28:10 | INFO     | startup:154 |   PDF Research Analyzer v1.0.0 starting up
+2026-03-17 20:28:10 | INFO     | startup:155 | ============================================================
+2026-03-17 20:28:10 | INFO     | startup:158 |   app_title                      PDF Research Analyzer
+2026-03-17 20:28:10 | INFO     | startup:158 |   version                        1.0.0
+2026-03-17 20:28:10 | INFO     | startup:158 |   debug                          False
+2026-03-17 20:28:10 | INFO     | startup:158 |   log_level                      INFO
+2026-03-17 20:28:10 | INFO     | startup:158 |   openrouter_model               openrouter/free
+2026-03-17 20:28:10 | INFO     | startup:158 |   openrouter_configured          True
+2026-03-17 20:28:10 | INFO     | startup:158 |   huggingface_model              meta-llama/Llama-3.1-8B-Instruct:cerebras
+2026-03-17 20:28:10 | INFO     | startup:158 |   huggingface_configured         True
+2026-03-17 20:28:10 | INFO     | startup:158 |   huggingface_base_url           https://router.huggingface.co/v1
+2026-03-17 20:28:10 | INFO     | startup:158 |   embedding_model                sentence-transformers/all-MiniLM-L6-v2
+2026-03-17 20:28:10 | INFO     | startup:158 |   embedding_dimension            384
+2026-03-17 20:28:10 | INFO     | startup:158 |   chunk_size                     500
+2026-03-17 20:28:10 | INFO     | startup:158 |   chunk_overlap                  50
+2026-03-17 20:28:10 | INFO     | startup:158 |   similarity_threshold           0.1
+2026-03-17 20:28:10 | INFO     | startup:158 |   top_k_results                  5
+2026-03-17 20:28:10 | INFO     | startup:158 |   max_file_size_mb               50
+2026-03-17 20:28:10 | INFO     | startup:158 |   upload_dir                     C:\Users\ADMIN\PycharmProjects\pdf_analyzer\data\uploads
+2026-03-17 20:28:10 | INFO     | startup:158 |   processed_dir                  C:\Users\ADMIN\PycharmProjects\pdf_analyzer\data\processed
+2026-03-17 20:28:10 | INFO     | startup:158 |   vectorstore_dir                C:\Users\ADMIN\PycharmProjects\pdf_analyzer\data\vectorstore
+2026-03-17 20:28:10 | INFO     | startup:160 | ------------------------------------------------------------
+2026-03-17 20:28:10 | INFO     | startup:166 |   ✓  Config validation passed — no warnings
+2026-03-17 20:28:10 | INFO     | startup:168 |   ✓  Log file: C:\Users\ADMIN\PycharmProjects\pdf_analyzer\logs\app_2026-03-17.log
+2026-03-17 20:28:10 | INFO     | startup:169 | ============================================================

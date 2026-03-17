@@ -86,15 +86,15 @@ MIN_CHUNK_LENGTH = int(os.getenv("MIN_CHUNK_LENGTH", "50"))
 # ─────────────────────────────────────────────────────────────────────────────
 # RAG / Retrieval
 # ─────────────────────────────────────────────────────────────────────────────
-TOP_K_RESULTS        = int(os.getenv("TOP_K_RESULTS",       "5"))
-SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.10"))
+TOP_K_RESULTS        = int(os.getenv("TOP_K_RESULTS",       "8"))
+SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.05"))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LLM Generation
 # ─────────────────────────────────────────────────────────────────────────────
-MAX_TOKENS            = int(os.getenv("MAX_TOKENS",            "1024"))
-TEMPERATURE           = float(os.getenv("TEMPERATURE",          "0.7"))
-CONTEXT_WINDOW_TOKENS = int(os.getenv("CONTEXT_WINDOW_TOKENS", "4000"))
+MAX_TOKENS            = int(os.getenv("MAX_TOKENS",            "2048"))
+TEMPERATURE           = float(os.getenv("TEMPERATURE",          "0.3"))
+CONTEXT_WINDOW_TOKENS = int(os.getenv("CONTEXT_WINDOW_TOKENS", "6000"))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Retry / Back-off

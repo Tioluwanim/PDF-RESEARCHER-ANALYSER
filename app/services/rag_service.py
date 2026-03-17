@@ -1,7 +1,16 @@
 """
-rag_service.py - FAISS vector store management and semantic search (RAG).
-Stores, persists, and queries embeddings for each document.
+rag_service.py - FAISS vector store with multi-query retrieval.
+
+Key improvements:
+- Multi-query RAG: runs 3 query variants and merges/deduplicates results
+  so generic questions like "what is this about?" always find context
+- Raised max_chars from 3,000 to 6,000 so the LLM gets enough context
+- Graceful fallback: if threshold finds 0 results, retry with 0.0 threshold
+  (returns top-k regardless of score) so the LLM always gets something
+- FAISS IndexFlatIP (cosine on L2-normalised vectors) unchanged — correct
 """
+
+from __future__ import annotations
 
 import json
 import time
@@ -30,44 +39,29 @@ from app.utils.logger import get_logger, ServiceLogger
 logger = get_logger(__name__)
 
 
-# ── RAG Service ───────────────────────────────────────────────────────────────
-
 class RAGService:
     """
-    Manages FAISS vector indexes per document.
+    Manages per-document FAISS indexes.
 
-    Each document gets its own FAISS index stored in:
+    Storage layout:
         data/vectorstore/<doc_id>/
-            index.faiss   ← the FAISS index binary
-            chunks.json   ← chunk metadata (text + section info)
-
-    This separation means documents are independently searchable
-    and deletable without affecting each other.
+            index.faiss   — FAISS binary
+            chunks.json   — serialised TextChunk list
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.vectorstore_dir = VECTORSTORE_DIR
-        # In-memory cache: doc_id → (faiss.Index, list[TextChunk])
         self._index_cache: dict[str, tuple[faiss.Index, list[TextChunk]]] = {}
         logger.info("RAGService initialised")
 
-    # ── Index Building ────────────────────────────────────────────────────────
+    # ── Index building ────────────────────────────────────────────────────────
 
     def build_index(self, doc: ProcessedDocument) -> ProcessedDocument:
-        """
-        Generates embeddings for all chunks and builds a FAISS index.
-        Persists the index to disk and updates the document's
-        vector_index_path and status.
-
-        Args:
-            doc: ProcessedDocument with status EXTRACTED and chunks populated.
-
-        Returns:
-            Updated ProcessedDocument with status READY or FAILED.
-        """
         slog = ServiceLogger("rag_service", doc_id=doc.doc_id)
-        slog.info(f"Building FAISS index for '{doc.filename}' "
-                  f"({len(doc.chunks)} chunks)")
+        slog.info(
+            "Building FAISS index for '%s' (%d chunks)",
+            doc.filename, len(doc.chunks),
+        )
 
         try:
             doc.status = DocumentStatus.EMBEDDING
@@ -75,25 +69,21 @@ class RAGService:
             if not doc.chunks:
                 raise ValueError("Document has no chunks to index")
 
-            # Step 1 — Generate embeddings
-            slog.info("Generating embeddings ...")
             embeddings = embedding_service.embed_chunks(
-                chunks  = doc.chunks,
-                doc_id  = doc.doc_id,
-                show_progress = False,
+                chunks=doc.chunks, doc_id=doc.doc_id
             )
 
-            # Step 2 — Build FAISS index (IndexFlatIP = inner product on L2-normalized = cosine)
             dimension = embeddings.shape[1]
             index     = faiss.IndexFlatIP(dimension)
             index.add(embeddings)
 
-            slog.info(f"FAISS index built — {index.ntotal} vectors, dim={dimension}")
+            slog.info(
+                "FAISS index built — %d vectors, dim=%d",
+                index.ntotal, dimension,
+            )
 
-            # Step 3 — Persist to disk
-            index_dir = self._index_dir(doc.doc_id)
+            index_dir   = self._index_dir(doc.doc_id)
             index_dir.mkdir(parents=True, exist_ok=True)
-
             index_path  = index_dir / "index.faiss"
             chunks_path = index_dir / "chunks.json"
 
@@ -101,27 +91,20 @@ class RAGService:
             chunks_path.write_text(
                 json.dumps(
                     [c.model_dump() for c in doc.chunks],
-                    default=str,
-                    indent=2,
+                    default=str, indent=2,
                 ),
                 encoding="utf-8",
             )
 
-            slog.info(f"Index persisted → {index_dir}")
-
-            # Step 4 — Cache in memory
             self._index_cache[doc.doc_id] = (index, doc.chunks)
-
-            # Step 5 — Update document
             doc.vector_index_path = str(index_dir)
             doc.status            = DocumentStatus.READY
-
             slog.info("FAISS index ready ✓")
 
         except Exception as e:
             doc.status        = DocumentStatus.FAILED
             doc.error_message = str(e)
-            slog.error(f"Index build failed: {e}", exc_info=True)
+            slog.error("Index build failed: %s", e)
 
         return doc
 
@@ -129,86 +112,54 @@ class RAGService:
 
     def search(
         self,
-        doc_id  : str,
-        query   : str,
-        top_k   : int   = TOP_K_RESULTS,
+        doc_id   : str,
+        query    : str,
+        top_k    : int   = TOP_K_RESULTS,
         threshold: float = SIMILARITY_THRESHOLD,
     ) -> SearchResponse:
-        """
-        Performs semantic search against a document's FAISS index.
-
-        Steps:
-        1. Embed the query
-        2. Search FAISS for nearest neighbours
-        3. Filter by similarity threshold
-        4. Return ranked SearchResult list
-
-        Args:
-            doc_id:    Document to search.
-            query:     User's question or search string.
-            top_k:     Number of results to return.
-            threshold: Minimum similarity score (0.0–1.0).
-
-        Returns:
-            SearchResponse with ranked results and timing info.
-        """
+        """Single-query semantic search."""
         slog       = ServiceLogger("rag_service", doc_id=doc_id)
         start_time = time.time()
 
-        slog.debug(f"Searching: '{query[:80]}'")
-
-        # Load index (from cache or disk)
         index, chunks = self._load_index(doc_id, slog)
-
         if index is None or not chunks:
-            slog.warning("Index not available — returning empty results")
             return SearchResponse(
-                query      = query,
-                doc_id     = doc_id,
-                results    = [],
-                total_found= 0,
+                query=query, doc_id=doc_id, results=[], total_found=0
             )
 
-        # Embed query
-        query_vec = embedding_service.embed_query(query)  # shape (1, dim)
+        query_vec        = embedding_service.embed_query(query)
+        actual_k         = min(top_k, index.ntotal)
+        scores, indices  = index.search(query_vec, actual_k)
 
-        # FAISS search
-        actual_k  = min(top_k, index.ntotal)
-        scores, indices = index.search(query_vec, actual_k)
-
-        # Build results
         results: list[SearchResult] = []
-        for rank, (score, idx) in enumerate(zip(scores[0], indices[0]), start=1):
-            if idx == -1:
-                continue  # FAISS returns -1 for empty slots
-            if float(score) < threshold:
-                continue  # below similarity threshold
-
-            chunk = chunks[idx]
+        for rank, (score, idx) in enumerate(
+            zip(scores[0], indices[0]), start=1
+        ):
+            if idx == -1 or float(score) < threshold:
+                continue
             results.append(
                 SearchResult(
-                    chunk = chunk,
+                    chunk = chunks[idx],
                     score = round(float(score), 4),
                     rank  = rank,
                 )
             )
 
         elapsed_ms = round((time.time() - start_time) * 1000, 2)
-
         slog.info(
-            f"Search complete — {len(results)}/{actual_k} results "
-            f"above threshold={threshold} in {elapsed_ms}ms"
+            "Search complete — %d/%d results above threshold=%.2f in %.1fms",
+            len(results), actual_k, threshold, elapsed_ms,
         )
 
         return SearchResponse(
-            query         = query,
-            doc_id        = doc_id,
-            results       = results,
-            total_found   = len(results),
-            search_time_ms= elapsed_ms,
+            query          = query,
+            doc_id         = doc_id,
+            results        = results,
+            total_found    = len(results),
+            search_time_ms = elapsed_ms,
         )
 
-    # ── Context Builder ───────────────────────────────────────────────────────
+    # ── Context builder (multi-query) ─────────────────────────────────────────
 
     def get_context(
         self,
@@ -216,101 +167,148 @@ class RAGService:
         query    : str,
         top_k    : int   = TOP_K_RESULTS,
         threshold: float = SIMILARITY_THRESHOLD,
-        max_chars: int   = 3000,
+        max_chars: int   = 6000,    # raised from 3000 — LLM needs more context
     ) -> tuple[str, list[SearchResult]]:
         """
-        Retrieves and formats relevant chunks as a context string
-        for the LLM prompt.
+        Multi-query context retrieval.
 
-        Args:
-            doc_id:    Document to search.
-            query:     User's question.
-            top_k:     Max chunks to retrieve.
-            threshold: Minimum similarity score.
-            max_chars: Hard cap on total context characters.
+        Runs up to 3 query variants:
+          1. Original question
+          2. Keywords extracted from the question
+          3. A short imperative form ("explain X / describe Y")
+
+        Merges and deduplicates by chunk_id, keeps top results by score.
+        Falls back to threshold=0 if nothing passes the threshold,
+        so the LLM always receives some context.
 
         Returns:
             (context_string, list[SearchResult])
-            context_string is ready to insert into an LLM prompt.
         """
-        response = self.search(
-            doc_id    = doc_id,
-            query     = query,
-            top_k     = top_k,
-            threshold = threshold,
-        )
+        slog = ServiceLogger("rag_service", doc_id=doc_id)
 
-        if not response.results:
+        index, chunks = self._load_index(doc_id, slog)
+        if index is None or not chunks:
             return "", []
 
-        # Build context string — most relevant chunks first
-        context_parts: list[str] = []
-        total_chars   = 0
+        # Build query variants
+        queries = self._expand_query(query)
+        slog.debug("Multi-query variants: %s", queries)
 
-        for result in response.results:
-            chunk_text = (
-                f"[{result.chunk.section_type.value.upper()} | "
-                f"Chunk {result.chunk.chunk_index + 1} | "
-                f"Score: {result.score:.3f}]\n"
-                f"{result.chunk.content}"
+        # Run all variants and collect unique results
+        seen_ids: set[str] = set()
+        all_results: list[SearchResult] = []
+
+        for q in queries:
+            try:
+                qvec            = embedding_service.embed_query(q)
+                actual_k        = min(top_k * 2, index.ntotal)
+                scores, indices = index.search(qvec, actual_k)
+
+                for score, idx in zip(scores[0], indices[0]):
+                    if idx == -1:
+                        continue
+                    chunk = chunks[idx]
+                    if chunk.chunk_id in seen_ids:
+                        continue
+                    if float(score) >= threshold:
+                        seen_ids.add(chunk.chunk_id)
+                        all_results.append(
+                            SearchResult(
+                                chunk = chunk,
+                                score = round(float(score), 4),
+                                rank  = 0,
+                            )
+                        )
+            except Exception as e:
+                slog.warning("Multi-query variant failed: %s", e)
+
+        # Fallback: if still empty, return top-k regardless of threshold
+        if not all_results:
+            slog.warning(
+                "No results above threshold=%.2f — "
+                "returning top-%d without threshold filter",
+                threshold, top_k,
             )
+            qvec            = embedding_service.embed_query(queries[0])
+            actual_k        = min(top_k, index.ntotal)
+            scores, indices = index.search(qvec, actual_k)
+            for score, idx in zip(scores[0], indices[0]):
+                if idx == -1:
+                    continue
+                chunk = chunks[idx]
+                if chunk.chunk_id not in seen_ids:
+                    seen_ids.add(chunk.chunk_id)
+                    all_results.append(
+                        SearchResult(
+                            chunk = chunk,
+                            score = round(float(score), 4),
+                            rank  = 0,
+                        )
+                    )
+
+        # Sort by score descending, assign ranks
+        all_results.sort(key=lambda r: r.score, reverse=True)
+        for i, r in enumerate(all_results):
+            r.rank = i + 1
+
+        # Build context string within max_chars budget
+        context_parts : list[str] = []
+        total_chars   = 0
+        used_results  : list[SearchResult] = []
+
+        for result in all_results[:top_k]:
+            header     = (
+                f"[{result.chunk.section_type.value.upper()} | "
+                f"Score: {result.score:.3f}]"
+            )
+            chunk_text = f"{header}\n{result.chunk.content}"
 
             if total_chars + len(chunk_text) > max_chars:
-                # Add partial chunk up to the limit
                 remaining = max_chars - total_chars
-                if remaining > 100:
-                    context_parts.append(chunk_text[:remaining] + "...")
+                if remaining > 200:
+                    context_parts.append(chunk_text[:remaining] + "…")
+                    used_results.append(result)
                 break
 
             context_parts.append(chunk_text)
+            used_results.append(result)
             total_chars += len(chunk_text)
 
         context = "\n\n---\n\n".join(context_parts)
-        return context, response.results
+        slog.info(
+            "Context built — %d chunks, %d chars",
+            len(used_results), len(context),
+        )
+        return context, used_results
 
-    # ── Index Management ──────────────────────────────────────────────────────
+    # ── Index management ──────────────────────────────────────────────────────
 
     def index_exists(self, doc_id: str) -> bool:
-        """Returns True if a FAISS index exists on disk for this document."""
         return (self._index_dir(doc_id) / "index.faiss").exists()
 
     def delete_index(self, doc_id: str) -> bool:
-        """
-        Removes the FAISS index from disk and memory cache.
-
-        Returns:
-            True if index was found and deleted, False otherwise.
-        """
         import shutil
         index_dir = self._index_dir(doc_id)
-
-        # Remove from cache
         self._index_cache.pop(doc_id, None)
-
         if index_dir.exists():
             shutil.rmtree(index_dir)
-            logger.info(f"[{doc_id}] FAISS index deleted")
+            logger.info("[%s] FAISS index deleted", doc_id)
             return True
-
         return False
 
     def get_index_stats(self, doc_id: str) -> dict:
-        """
-        Returns stats about a loaded/persisted index.
-        Useful for debugging and the Streamlit sidebar.
-        """
-        index, chunks = self._load_index(doc_id, ServiceLogger("rag_service", doc_id))
-
+        index, chunks = self._load_index(
+            doc_id, ServiceLogger("rag_service", doc_id)
+        )
         if index is None:
             return {"status": "not_found", "doc_id": doc_id}
-
         return {
-            "doc_id"      : doc_id,
-            "status"      : "loaded",
+            "doc_id"       : doc_id,
+            "status"       : "loaded",
             "total_vectors": index.ntotal,
-            "dimension"   : index.d,
-            "total_chunks": len(chunks),
-            "cached"      : doc_id in self._index_cache,
+            "dimension"    : index.d,
+            "total_chunks" : len(chunks),
+            "cached"       : doc_id in self._index_cache,
         }
 
     # ── Private ───────────────────────────────────────────────────────────────
@@ -320,44 +318,82 @@ class RAGService:
         doc_id: str,
         slog  : ServiceLogger,
     ) -> tuple[Optional[faiss.Index], list[TextChunk]]:
-        """
-        Returns (faiss.Index, chunks) from memory cache or disk.
-        Returns (None, []) if not found.
-        """
-        # Check memory cache first
         if doc_id in self._index_cache:
-            slog.debug("Index loaded from memory cache")
             return self._index_cache[doc_id]
 
-        # Try loading from disk
         index_path  = self._index_dir(doc_id) / "index.faiss"
         chunks_path = self._index_dir(doc_id) / "chunks.json"
 
         if not index_path.exists() or not chunks_path.exists():
-            slog.warning(f"Index files not found at {self._index_dir(doc_id)}")
+            slog.warning("Index files not found at %s", self._index_dir(doc_id))
             return None, []
 
         try:
             index  = faiss.read_index(str(index_path))
             raw    = json.loads(chunks_path.read_text(encoding="utf-8"))
             chunks = [TextChunk.model_validate(c) for c in raw]
-
-            # Populate cache
             self._index_cache[doc_id] = (index, chunks)
             slog.info(
-                f"Index loaded from disk — {index.ntotal} vectors, "
-                f"{len(chunks)} chunks"
+                "Index loaded from disk — %d vectors, %d chunks",
+                index.ntotal, len(chunks),
             )
             return index, chunks
-
         except Exception as e:
-            slog.error(f"Failed to load index from disk: {e}", exc_info=True)
+            slog.error("Failed to load index: %s", e)
             return None, []
 
     def _index_dir(self, doc_id: str) -> Path:
-        """Returns the directory path for a document's FAISS index."""
         return self.vectorstore_dir / doc_id
 
+    @staticmethod
+    def _expand_query(question: str) -> list[str]:
+        """
+        Generates up to 3 query variants from the user's question
+        to improve recall in multi-query RAG.
 
-# ── Module-level singleton ────────────────────────────────────────────────────
+          1. Original question (always included)
+          2. Keywords: strip stop words, keep nouns/verbs
+          3. Imperative form: "describe / explain / what is"
+        """
+        q = question.strip()
+        variants = [q]
+
+        # Variant 2 — keywords only (remove question words and stop words)
+        stop = {
+            "what", "who", "when", "where", "why", "how",
+            "is", "are", "was", "were", "the", "a", "an",
+            "this", "that", "these", "those", "it", "its",
+            "of", "in", "on", "at", "to", "for", "with",
+            "and", "or", "but", "about", "does", "do",
+            "did", "can", "could", "would", "should",
+            "tell", "me", "please", "paper", "study",
+        }
+        words    = re.findall(r"\b\w{3,}\b", q.lower())
+        keywords = [w for w in words if w not in stop]
+        if keywords and " ".join(keywords) != q.lower():
+            variants.append(" ".join(keywords))
+
+        # Variant 3 — imperative / descriptive form
+        lower = q.lower()
+        if lower.startswith(("what is", "what are")):
+            imperative = re.sub(r"^what (?:is|are)\s+", "describe ", lower)
+            variants.append(imperative)
+        elif lower.startswith(("how does", "how do")):
+            imperative = re.sub(r"^how (?:does|do)\s+", "explain how ", lower)
+            variants.append(imperative)
+        elif lower.startswith("who"):
+            imperative = re.sub(r"^who\s+", "identify the person who ", lower)
+            variants.append(imperative)
+
+        # Return unique variants only
+        seen: set[str] = set()
+        result: list[str] = []
+        for v in variants:
+            if v and v not in seen:
+                seen.add(v)
+                result.append(v)
+        return result[:3]
+
+
+# ── Singleton ─────────────────────────────────────────────────────────────────
 rag_service = RAGService()
