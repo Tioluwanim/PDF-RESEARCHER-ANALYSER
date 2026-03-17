@@ -359,27 +359,41 @@ class ExtractionService:
     @staticmethod
     def _split_sentences(text: str) -> list[str]:
         """
-        Lightweight sentence splitter that handles:
-        - Abbreviations (Mr., Dr., et al., Fig., vs.)
-        - Decimal numbers (3.14)
-        - Section numbers (2.1, 3.4.1)
-        Returns a flat list of sentence strings.
+        Lightweight sentence splitter.
+        Splits on '. ', '! ', '? ' followed by a capital letter,
+        but not after common abbreviations or decimal numbers.
+        Uses a simple two-pass approach to avoid variable-width lookbehind.
         """
-        # Common abbreviations that contain periods but aren't sentence ends
-        abbrevs = r"(?:Mr|Mrs|Dr|Prof|Fig|Tab|Eq|Sec|Vol|No|pp|et al|vs|i\.e|e\.g|cf|approx|avg)"
+        # Common abbreviations — protect them by replacing their period temporarily
+        abbrev_patterns = [
+            r"Mr\.", r"Mrs\.", r"Dr\.", r"Prof\.", r"Fig\.", r"Tab\.",
+            r"Eq\.", r"Sec\.", r"Vol\.", r"No\.", r"pp\.", r"vs\.",
+            r"et al\.", r"i\.e\.", r"e\.g\.", r"cf\.", r"approx\.",
+        ]
+        protected = text
+        placeholder_map: dict[str, str] = {}
+        for i, abbrev in enumerate(abbrev_patterns):
+            placeholder = f"__ABBREV{i}__"
+            protected   = re.sub(abbrev, lambda m, p=placeholder: m.group().replace(".", p), protected)
+            placeholder_map[placeholder] = "."
 
-        # Split on sentence-ending punctuation followed by whitespace + capital
-        # but NOT on abbreviations or decimals
-        pattern = re.compile(
-            r"(?<!\b" + abbrevs + r")"   # not after abbreviation
-            r"(?<!\d)"                    # not after digit (decimal)
-            r"(?<=[.!?])"                 # preceded by sentence-end punctuation
-            r"\s+"                        # whitespace
-            r"(?=[A-Z\[\(])",             # followed by capital or bracket
-        )
-        parts = pattern.split(text)
-        # Strip and remove empties
-        return [s.strip() for s in parts if s.strip() and len(s.strip()) > 5]
+        # Also protect decimal numbers like 3.14, 2.1, 99.9
+        protected = re.sub(r"(\d)\.(\d)", r"\1__DECIMAL__\2", protected)
+
+        # Now split on sentence-ending punctuation followed by whitespace + capital
+        parts = re.split(r"(?<=[.!?])\s+(?=[A-Z\[\(])", protected)
+
+        # Restore placeholders
+        restored: list[str] = []
+        for part in parts:
+            part = part.replace("__DECIMAL__", ".")
+            for placeholder in placeholder_map:
+                part = part.replace(placeholder, ".")
+            part = part.strip()
+            if part and len(part) > 5:
+                restored.append(part)
+
+        return restored
 
     # ── Heading classifier ────────────────────────────────────────────────────
 
