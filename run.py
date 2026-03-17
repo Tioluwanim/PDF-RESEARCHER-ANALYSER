@@ -76,7 +76,6 @@ def main() -> None:
     cmd = [
         sys.executable, "-m", "streamlit", "run", str(app_path),
         "--server.headless",          "true",
-        "--server.port",              "8501",
         "--server.address",           "0.0.0.0",
         "--browser.gatherUsageStats", "false",
         "--theme.base",               "light",

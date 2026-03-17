@@ -1,0 +1,15 @@
+[server]
+headless = true
+address = "0.0.0.0"
+# Do NOT set port — Streamlit Cloud assigns it automatically
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#bf3a14"
+backgroundColor = "#f8f5f0"
+secondaryBackgroundColor = "#eee9e0"
+textColor = "#0d0c0b"
+font = "sans serif"
