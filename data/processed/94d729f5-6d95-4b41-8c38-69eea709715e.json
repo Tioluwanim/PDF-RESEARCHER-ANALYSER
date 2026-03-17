@@ -1,0 +1,71 @@
+{
+  "doc_id": "94d729f5-6d95-4b41-8c38-69eea709715e",
+  "filename": "Student_Performance_Project_Report.pdf",
+  "file_path": "C:\\Users\\ADMIN\\PycharmProjects\\pdf_analyzer\\data\\uploads\\94d729f5-6d95-4b41-8c38-69eea709715e_Student_Performance_Project_Report.pdf",
+  "status": "ready",
+  "metadata": {
+    "title": "Student Performance Predictor",
+    "authors": [
+      "python-docx"
+    ],
+    "abstract": "",
+    "keywords": [],
+    "page_count": 2,
+    "word_count": 283,
+    "language": "en",
+    "created_at": "D:20260317072116+00'00'",
+    "file_size_bytes": 466371
+  },
+  "full_text": "Student Performance Predictor   \nProject Report \n1. Problem Definition \nThis project aims to build a machine learning model that predicts whether a student will \npass or fail based on specific features. The problem is a binary classification task where the \ntarget variable is labeled as 'pass' or 'fail'. \n2. Data Source and Preprocessing \nThe dataset used for this project is 'student-mat.csv', originally from the UCI Machine \nLearning Repository. It contains student information from a Portuguese secondary school. \nPreprocessing steps include: \n- Removing missing values \n- Label encoding categorical features \n- Creating a binary target variable from the 'G3' grade \n- Selecting 8 key numeric features for the model: age, studytime, failures, absences, goout, \nDalc, Walc, health \n3. Model Description and Performance Metrics \nThe model used is a Random Forest Classifier with 100 estimators. It was trained using 80% \nof the dataset and tested on the remaining 20%. Evaluation metrics: \n- Accuracy: around 0.84 (exact may vary based on random seed) \n- Classification Report: includes precision, recall, and F1-score for each class \n- Confusion Matrix: helps visualize true/false positives and negatives \n4. Screenshots of Flask Application \nScreenshot of the Flask web interface can be inserted here manually in the final document. \n5. Reflection \nWhat Worked: \n- Model training with key features produced good results \n- Flask app allows user-friendly predictions \n- Form-based interface ensures easy input \n \nWhat Didn t: \n- Original model used too many features; had to retrain for compatibility with web UI\n\n- Ensuring input feature alignment required careful restructuring \n \nFuture Improvements: \n- Add more features to improve accuracy \n- Implement model explainability (e.g., SHAP values) \n- Improve UI with dropdowns and data validation \n- Deploy online using services like Heroku or Render",
+  "sections": [
+    {
+      "section_type": "results",
+      "title": "of the dataset and tested on the remaining 20%. Evaluation metrics:",
+      "content": "- Accuracy: around 0.84 (exact may vary based on random seed) \n- Classification Report: includes precision, recall, and F1-score for each class \n- Confusion Matrix: helps visualize true/false positives and negatives \n4. Screenshots of Flask Application \nScreenshot of the Flask web interface can be inserted here manually in the final document. \n5. Reflection \nWhat Worked:",
+      "page_start": 0,
+      "page_end": 0,
+      "char_start": 924,
+      "char_end": 1297,
+      "word_count": 55
+    },
+    {
+      "section_type": "results",
+      "title": "- Model training with key features produced good results",
+      "content": "- Flask app allows user-friendly predictions \n- Form-based interface ensures easy input \n \nWhat Didn t: \n- Original model used too many features; had to retrain for compatibility with web UI\n\n- Ensuring input feature alignment required careful restructuring \n \nFuture Improvements: \n- Add more features to improve accuracy \n- Implement model explainability (e.g., SHAP values) \n- Improve UI with dropdowns and data validation \n- Deploy online using services like Heroku or Render",
+      "page_start": 0,
+      "page_end": 0,
+      "char_start": 1368,
+      "char_end": 1847,
+      "word_count": 71
+    }
+  ],
+  "chunks": [
+    {
+      "chunk_id": "dbc2ce61-1143-49fb-8424-2993215513f5",
+      "doc_id": "94d729f5-6d95-4b41-8c38-69eea709715e",
+      "content": "- Accuracy: around 0.84 (exact may vary based on random seed) - Classification Report: includes precision, recall, and F1-score for each class - Confusion Matrix: helps visualize true/false positives and negatives 4. Screenshots of Flask Application Screenshot of the Flask web interface can be inserted here manually in the final document. 5. Reflection What Worked:",
+      "section_type": "results",
+      "chunk_index": 0,
+      "total_chunks": 2,
+      "page_number": 0,
+      "word_count": 55,
+      "char_count": 367
+    },
+    {
+      "chunk_id": "eade91ae-67cb-42d3-bfe1-766e9f4dac56",
+      "doc_id": "94d729f5-6d95-4b41-8c38-69eea709715e",
+      "content": "- Flask app allows user-friendly predictions - Form-based interface ensures easy input What Didn t: - Original model used too many features; had to retrain for compatibility with web UI - Ensuring input feature alignment required careful restructuring Future Improvements: - Add more features to improve accuracy - Implement model explainability (e.g., SHAP values) - Improve UI with dropdowns and data validation - Deploy online using services like Heroku or Render",
+      "section_type": "results",
+      "chunk_index": 1,
+      "total_chunks": 2,
+      "page_number": 0,
+      "word_count": 71,
+      "char_count": 466
+    }
+  ],
+  "chunk_count": 2,
+  "vector_index_path": "C:\\Users\\ADMIN\\PycharmProjects\\pdf_analyzer\\data\\vectorstore\\94d729f5-6d95-4b41-8c38-69eea709715e",
+  "error_message": null,
+  "created_at": "2026-03-17T15:32:01.800904",
+  "updated_at": "2026-03-17T15:32:02.124072"
+}

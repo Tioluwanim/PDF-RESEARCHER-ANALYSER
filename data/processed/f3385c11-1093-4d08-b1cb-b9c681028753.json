@@ -1,0 +1,218 @@
+{
+  "doc_id": "f3385c11-1093-4d08-b1cb-b9c681028753",
+  "filename": "test_research_paper.pdf",
+  "file_path": "C:\\Users\\ADMIN\\PycharmProjects\\pdf_analyzer\\data\\uploads\\f3385c11-1093-4d08-b1cb-b9c681028753_test_research_paper.pdf",
+  "status": "ready",
+  "metadata": {
+    "title": "(anonymous)",
+    "authors": [
+      "(anonymous)"
+    ],
+    "abstract": "Sleep deprivation is increasingly recognised as a significant public health challenge among\nuniversity students. This study investigates the relationship between sleep duration, sleep quality,\nand academic performance across a sample of 412 undergraduate students at the University of\nLagos over one academic semester. Using validated instruments including the Pittsburgh Sleep\nQuality Index (PSQI) and official grade point averages (GPA), we find that students sleeping fewer\nthan six hours per night scored an average of 0.74 GPA points lower than those sleeping seven to",
+    "keywords": [],
+    "page_count": 3,
+    "word_count": 989,
+    "language": "en",
+    "created_at": "D:20260317160145+00'00'",
+    "file_size_bytes": 8135
+  },
+  "full_text": "The Impact of Sleep Deprivation on Academic\nPerformance\nJames Adeyemi, Fatima Al-Hassan, Lucas Mendes\nDepartment of Cognitive Science, University of Lagos   March 2024\nAbstract\nSleep deprivation is increasingly recognised as a significant public health challenge among\nuniversity students. This study investigates the relationship between sleep duration, sleep quality,\nand academic performance across a sample of 412 undergraduate students at the University of\nLagos over one academic semester. Using validated instruments including the Pittsburgh Sleep\nQuality Index (PSQI) and official grade point averages (GPA), we find that students sleeping fewer\nthan six hours per night scored an average of 0.74 GPA points lower than those sleeping seven to\nnine hours. Multivariate regression analysis controlling for gender, year of study, and part-time\nemployment confirms that sleep duration is a statistically significant independent predictor of\nacademic outcomes (p < 0.001). These findings have important implications for university wellness\nprogrammes and academic scheduling policy.\n1. Introduction\nAdequate sleep is essential for cognitive function, memory consolidation, and emotional\nregulation. Despite this, surveys consistently show that between 60 and 70 percent of university\nstudents report insufficient sleep on a regular basis. Factors contributing to poor sleep in this\npopulation include academic workload, social activities, part-time employment, digital device use,\nand irregular schedules arising from the flexibility of university life.\nPrevious research in North American and European contexts has established a robust association\nbetween poor sleep and reduced academic performance. However, comparatively little work has\nexamined this relationship within Sub-Saharan African university settings, where students may\nface additional stressors including commuting distances, power outages affecting study\nenvironments, and financial pressures. This study addresses that gap by examining sleep and\nacademic outcomes in a large Nigerian university cohort.\nWe hypothesise that (H1) shorter sleep duration will be associated with lower GPA, and (H2)\npoorer subjective sleep quality will independently predict academic underperformance even after\ncontrolling for total sleep time.\n2. Methods\nParticipants were recruited via stratified random sampling across all six faculties of the University\nof Lagos during the 2023/2024 academic year. A total of 412 undergraduate students (217 female,\n\n195 male; mean age 20.4 years, SD = 1.8) completed the study. Inclusion criteria required full-time\nenrolment and no diagnosed sleep disorder.\nSleep was assessed using two measures. Objective sleep duration was estimated via a seven-day\nwrist actigraphy protocol using Philips Actiwatch devices. Subjective sleep quality was measured\nusing the Pittsburgh Sleep Quality Index (PSQI), a validated 19-item self-report questionnaire\nyielding a global score from 0 to 21, with scores above five indicating poor sleep quality.\nAcademic performance was operationalised as cumulative GPA at the end of the semester,\nobtained with written consent from the academic registry. Statistical analyses were conducted in R\n4.3.1. We used Pearson correlations for bivariate relationships and hierarchical multiple regression\nfor multivariate analyses. Significance threshold was set at alpha = 0.05.\n3. Results\nThe mean nightly sleep duration across the sample was 5.9 hours (SD = 1.2). Only 31 percent of\nparticipants met the recommended minimum of seven hours per night. Mean PSQI score was 7.3\n(SD = 2.6), indicating that the majority of participants experienced poor sleep quality by standard\nclinical thresholds.\nBivariate analysis revealed a significant positive correlation between sleep duration and GPA (r =\n0.48, p < 0.001). Students in the lowest sleep quartile (less than 5 hours) had a mean GPA of\n2.61, compared to 3.35 for students in the highest quartile (7 or more hours). PSQI global score\nwas negatively correlated with GPA (r = -0.39, p < 0.001), confirming that subjective sleep quality\nindependently predicted performance.\nThe hierarchical regression model explained 38 percent of variance in GPA (adjusted R2 = 0.38).\nIn the final model, sleep duration (beta = 0.31, p < 0.001) and PSQI score (beta = -0.22, p < 0.001)\nremained significant after controlling for gender, year of study, and part-time employment status.\nFemale students showed marginally higher GPA on average (beta = 0.09, p = 0.04), and third-year\nstudents outperformed first-year students (beta = 0.14, p = 0.01).\n4. Discussion\nOur findings confirm and extend prior work by demonstrating that sleep deprivation significantly\nundermines academic performance in a West African university context. The effect size observed\n(approximately 0.74 GPA points between lowest and highest sleep quartiles) is comparable to that\nreported in North American studies, suggesting the relationship is robust across cultural and\ninstitutional settings.\nThe independent contribution of sleep quality beyond sleep duration is a noteworthy finding.\nStudents who spend adequate time in bed but report fragmented or non-restorative sleep are still\nacademically disadvantaged. This implies that intervention programmes should address sleep\nhygiene and sleep disorders, not merely encourage earlier bedtimes.\n\n5. Conclusion\nThis study provides strong evidence that sleep deprivation negatively impacts academic\nperformance among Nigerian university students. Both sleep duration and sleep quality are\nindependent predictors of GPA. Universities should consider embedding sleep health education\ninto orientation programmes, revising examination scheduling to avoid early morning slots, and\nproviding access to evidence-based cognitive behavioural therapy for insomnia (CBT-I) through\nstudent wellness centres. Future research should employ longitudinal designs to establish causal\ndirectionality and examine the role of napping behaviour as a compensatory strategy.\nReferences\n[1] Buysse, D. J., Reynolds, C. F., Monk, T. H., Berman, S. R., & Kupfer, D. J. (1989). The Pittsburgh Sleep\nQuality Index: A new instrument for psychiatric practice and research. Psychiatry Research, 28(2), 193 213.\n[2] Curcio, G., Ferrara, M., & De Gennaro, L. (2006). Sleep loss, learning capacity and academic\nperformance. Sleep Medicine Reviews, 10(5), 323 337.\n[3] Onyeka, I. N., & Obi, C. (2021). Sleep patterns and academic achievement among Nigerian\nundergraduates: A cross-sectional study. African Journal of Health Sciences, 34(1), 45 58.\n[4] Walker, M. (2017). Why We Sleep: Unlocking the Power of Sleep and Dreams. Scribner.\n[5] Lund, H. G., Reider, B. D., Whiting, A. B., & Prichard, J. R. (2010). Sleep patterns and predictors of\ndisturbed sleep in a large population of college students. Journal of Adolescent Health, 46(2), 124 132.",
+  "sections": [
+    {
+      "section_type": "abstract",
+      "title": "Abstract",
+      "content": "Sleep deprivation is increasingly recognised as a significant public health challenge among\nuniversity students. This study investigates the relationship between sleep duration, sleep quality,\nand academic performance across a sample of 412 undergraduate students at the University of\nLagos over one academic semester. Using validated instruments including the Pittsburgh Sleep\nQuality Index (PSQI) and official grade point averages (GPA), we find that students sleeping fewer\nthan six hours per night scored an average of 0.74 GPA points lower than those sleeping seven to",
+      "page_start": 0,
+      "page_end": 0,
+      "char_start": 167,
+      "char_end": 740,
+      "word_count": 83
+    },
+    {
+      "section_type": "discussion",
+      "title": "nine hours. Multivariate regression analysis controlling for gender, year of study, and part-time",
+      "content": "employment confirms that sleep duration is a statistically significant independent predictor of",
+      "page_start": 0,
+      "page_end": 0,
+      "char_start": 750,
+      "char_end": 845,
+      "word_count": 12
+    },
+    {
+      "section_type": "introduction",
+      "title": "1. Introduction",
+      "content": "Adequate sleep is essential for cognitive function, memory consolidation, and emotional\nregulation. Despite this, surveys consistently show that between 60 and 70 percent of university\nstudents report insufficient sleep on a regular basis. Factors contributing to poor sleep in this\npopulation include academic workload, social activities, part-time employment, digital device use,\nand irregular schedules arising from the flexibility of university life.\nPrevious research in North American and European contexts has established a robust association\nbetween poor sleep and reduced academic performance. However, comparatively little work has\nexamined this relationship within Sub-Saharan African university settings, where students may\nface additional stressors including commuting distances, power outages affecting study\nenvironments, and financial pressures. This study addresses that gap by examining sleep and\nacademic outcomes in a large Nigerian university cohort.\nWe hypothesise that (H1) shorter sleep duration will be associated with lower GPA, and (H2)\npoorer subjective sleep quality will independently predict academic underperformance even after\ncontrolling for total sleep time.",
+      "page_start": 0,
+      "page_end": 0,
+      "char_start": 1085,
+      "char_end": 2278,
+      "word_count": 159
+    },
+    {
+      "section_type": "methods",
+      "title": "2. Methods",
+      "content": "Participants were recruited via stratified random sampling across all six faculties of the University\nof Lagos during the 2023/2024 academic year. A total of 412 undergraduate students (217 female,\n\n195 male; mean age 20.4 years, SD = 1.8) completed the study. Inclusion criteria required full-time\nenrolment and no diagnosed sleep disorder.\nSleep was assessed using two measures. Objective sleep duration was estimated via a seven-day\nwrist actigraphy protocol using Philips Actiwatch devices. Subjective sleep quality was measured\nusing the Pittsburgh Sleep Quality Index (PSQI), a validated 19-item self-report questionnaire\nyielding a global score from 0 to 21, with scores above five indicating poor sleep quality.\nAcademic performance was operationalised as cumulative GPA at the end of the semester,\nobtained with written consent from the academic registry. Statistical analyses were conducted in R\n4.3.1. We used Pearson correlations for bivariate relationships and hierarchical multiple regression\nfor multivariate analyses. Significance threshold was set at alpha = 0.05.",
+      "page_start": 0,
+      "page_end": 0,
+      "char_start": 2295,
+      "char_end": 3376,
+      "word_count": 155
+    },
+    {
+      "section_type": "results",
+      "title": "3. Results",
+      "content": "The mean nightly sleep duration across the sample was 5.9 hours (SD = 1.2). Only 31 percent of\nparticipants met the recommended minimum of seven hours per night. Mean PSQI score was 7.3\n(SD = 2.6), indicating that the majority of participants experienced poor sleep quality by standard\nclinical thresholds.",
+      "page_start": 1,
+      "page_end": 1,
+      "char_start": 3388,
+      "char_end": 3694,
+      "word_count": 50
+    },
+    {
+      "section_type": "discussion",
+      "title": "Bivariate analysis revealed a significant positive correlation between sleep duration and GPA (r =",
+      "content": "0.48, p < 0.001). Students in the lowest sleep quartile (less than 5 hours) had a mean GPA of\n2.61, compared to 3.35 for students in the highest quartile (7 or more hours). PSQI global score\nwas negatively correlated with GPA (r = -0.39, p < 0.001), confirming that subjective sleep quality\nindependently predicted performance.\nThe hierarchical regression model explained 38 percent of variance in GPA (adjusted R2 = 0.38).\nIn the final model, sleep duration (beta = 0.31, p < 0.001) and PSQI score (beta = -0.22, p < 0.001)\nremained significant after controlling for gender, year of study, and part-time employment status.\nFemale students showed marginally higher GPA on average (beta = 0.09, p = 0.04), and third-year\nstudents outperformed first-year students (beta = 0.14, p = 0.01).",
+      "page_start": 1,
+      "page_end": 1,
+      "char_start": 3706,
+      "char_end": 4492,
+      "word_count": 130
+    },
+    {
+      "section_type": "results",
+      "title": "Our findings confirm and extend prior work by demonstrating that sleep deprivation significantly",
+      "content": "undermines academic performance in a West African university context. The effect size observed\n(approximately 0.74 GPA points between lowest and highest sleep quartiles) is comparable to that\nreported in North American studies, suggesting the relationship is robust across cultural and\ninstitutional settings.\nThe independent contribution of sleep quality beyond sleep duration is a noteworthy finding.\nStudents who spend adequate time in bed but report fragmented or non-restorative sleep are still\nacademically disadvantaged. This implies that intervention programmes should address sleep\nhygiene and sleep disorders, not merely encourage earlier bedtimes.",
+      "page_start": 1,
+      "page_end": 1,
+      "char_start": 4606,
+      "char_end": 5264,
+      "word_count": 89
+    },
+    {
+      "section_type": "conclusion",
+      "title": "5. Conclusion",
+      "content": "This study provides strong evidence that sleep deprivation negatively impacts academic\nperformance among Nigerian university students. Both sleep duration and sleep quality are\nindependent predictors of GPA. Universities should consider embedding sleep health education\ninto orientation programmes, revising examination scheduling to avoid early morning slots, and\nproviding access to evidence-based cognitive behavioural therapy for insomnia (CBT-I) through\nstudent wellness centres. Future research should employ longitudinal designs to establish causal\ndirectionality and examine the role of napping behaviour as a compensatory strategy.",
+      "page_start": 2,
+      "page_end": 2,
+      "char_start": 5363,
+      "char_end": 6003,
+      "word_count": 81
+    },
+    {
+      "section_type": "references",
+      "title": "References",
+      "content": "[1] Buysse, D. J., Reynolds, C. F., Monk, T. H., Berman, S. R., & Kupfer, D. J. (1989). The Pittsburgh Sleep\nQuality Index: A new instrument for psychiatric practice and research. Psychiatry Research, 28(2), 193 213.\n[2] Curcio, G., Ferrara, M., & De Gennaro, L. (2006). Sleep loss, learning capacity and academic\nperformance. Sleep Medicine Reviews, 10(5), 323 337.\n[3] Onyeka, I. N., & Obi, C. (2021). Sleep patterns and academic achievement among Nigerian\nundergraduates: A cross-sectional study. African Journal of Health Sciences, 34(1), 45 58.\n[4] Walker, M. (2017). Why We Sleep: Unlocking the Power of Sleep and Dreams. Scribner.\n[5] Lund, H. G., Reider, B. D., Whiting, A. B., & Prichard, J. R. (2010). Sleep patterns and predictors of\ndisturbed sleep in a large population of college students. Journal of Adolescent Health, 46(2), 124 132.",
+      "page_start": 2,
+      "page_end": 2,
+      "char_start": 6018,
+      "char_end": 6867,
+      "word_count": 137
+    }
+  ],
+  "chunks": [
+    {
+      "chunk_id": "3ab8c894-8be3-4538-b017-bf8d6735dec7",
+      "doc_id": "f3385c11-1093-4d08-b1cb-b9c681028753",
+      "content": "Sleep deprivation is increasingly recognised as a significant public health challenge among university students. This study investigates the relationship between sleep duration, sleep quality, and academic performance across a sample of 412 undergraduate students at the University of Lagos over one academic semester. Using validated instruments including the Pittsburgh Sleep Quality Index (PSQI) and official grade point averages (GPA), we find that students sleeping fewer than six hours per night scored an average of 0.74 GPA points lower than those sleeping seven to",
+      "section_type": "abstract",
+      "chunk_index": 0,
+      "total_chunks": 9,
+      "page_number": 0,
+      "word_count": 83,
+      "char_count": 573
+    },
+    {
+      "chunk_id": "0af33502-af24-495f-886d-5a149aa24540",
+      "doc_id": "f3385c11-1093-4d08-b1cb-b9c681028753",
+      "content": "employment confirms that sleep duration is a statistically significant independent predictor of",
+      "section_type": "discussion",
+      "chunk_index": 1,
+      "total_chunks": 9,
+      "page_number": 0,
+      "word_count": 12,
+      "char_count": 95
+    },
+    {
+      "chunk_id": "0f264778-01e3-49cd-ac5c-a3c80ddc2c2c",
+      "doc_id": "f3385c11-1093-4d08-b1cb-b9c681028753",
+      "content": "Adequate sleep is essential for cognitive function, memory consolidation, and emotional regulation. Despite this, surveys consistently show that between 60 and 70 percent of university students report insufficient sleep on a regular basis. Factors contributing to poor sleep in this population include academic workload, social activities, part-time employment, digital device use, and irregular schedules arising from the flexibility of university life. Previous research in North American and European contexts has established a robust association between poor sleep and reduced academic performance. However, comparatively little work has examined this relationship within Sub-Saharan African university settings, where students may face additional stressors including commuting distances, power outages affecting study environments, and financial pressures. This study addresses that gap by examining sleep and academic outcomes in a large Nigerian university cohort. We hypothesise that (H1) shorter sleep duration will be associated with lower GPA, and (H2) poorer subjective sleep quality will independently predict academic underperformance even after controlling for total sleep time.",
+      "section_type": "introduction",
+      "chunk_index": 2,
+      "total_chunks": 9,
+      "page_number": 0,
+      "word_count": 159,
+      "char_count": 1193
+    },
+    {
+      "chunk_id": "ac67c55e-7769-444e-88ed-6e7b3d59bebe",
+      "doc_id": "f3385c11-1093-4d08-b1cb-b9c681028753",
+      "content": "Participants were recruited via stratified random sampling across all six faculties of the University of Lagos during the 2023/2024 academic year. A total of 412 undergraduate students (217 female, 195 male; mean age 20.4 years, SD = 1.8) completed the study. Inclusion criteria required full-time enrolment and no diagnosed sleep disorder. Sleep was assessed using two measures. Objective sleep duration was estimated via a seven-day wrist actigraphy protocol using Philips Actiwatch devices. Subjective sleep quality was measured using the Pittsburgh Sleep Quality Index (PSQI), a validated 19-item self-report questionnaire yielding a global score from 0 to 21, with scores above five indicating poor sleep quality. Academic performance was operationalised as cumulative GPA at the end of the semester, obtained with written consent from the academic registry. Statistical analyses were conducted in R 4.3.1. We used Pearson correlations for bivariate relationships and hierarchical multiple regression for multivariate analyses. Significance threshold was set at alpha = 0.05.",
+      "section_type": "methods",
+      "chunk_index": 3,
+      "total_chunks": 9,
+      "page_number": 0,
+      "word_count": 155,
+      "char_count": 1080
+    },
+    {
+      "chunk_id": "dbb61018-fd2f-4cb2-8c7c-4e99af61a654",
+      "doc_id": "f3385c11-1093-4d08-b1cb-b9c681028753",
+      "content": "The mean nightly sleep duration across the sample was 5.9 hours (SD = 1.2). Only 31 percent of participants met the recommended minimum of seven hours per night. Mean PSQI score was 7.3 (SD = 2.6), indicating that the majority of participants experienced poor sleep quality by standard clinical thresholds.",
+      "section_type": "results",
+      "chunk_index": 4,
+      "total_chunks": 9,
+      "page_number": 1,
+      "word_count": 50,
+      "char_count": 306
+    },
+    {
+      "chunk_id": "34749f55-a509-4016-9d52-e1c2c9277340",
+      "doc_id": "f3385c11-1093-4d08-b1cb-b9c681028753",
+      "content": "0.48, p < 0.001). Students in the lowest sleep quartile (less than 5 hours) had a mean GPA of 2.61, compared to 3.35 for students in the highest quartile (7 or more hours). PSQI global score was negatively correlated with GPA (r = -0.39, p < 0.001), confirming that subjective sleep quality independently predicted performance. The hierarchical regression model explained 38 percent of variance in GPA (adjusted R2 = 0.38). In the final model, sleep duration (beta = 0.31, p < 0.001) and PSQI score (beta = -0.22, p < 0.001) remained significant after controlling for gender, year of study, and part-time employment status. Female students showed marginally higher GPA on average (beta = 0.09, p = 0.04), and third-year students outperformed first-year students (beta = 0.14, p = 0.01).",
+      "section_type": "discussion",
+      "chunk_index": 5,
+      "total_chunks": 9,
+      "page_number": 1,
+      "word_count": 130,
+      "char_count": 786
+    },
+    {
+      "chunk_id": "8ac8813e-f04e-4e06-a9fb-d2b666dfce5a",
+      "doc_id": "f3385c11-1093-4d08-b1cb-b9c681028753",
+      "content": "undermines academic performance in a West African university context. The effect size observed (approximately 0.74 GPA points between lowest and highest sleep quartiles) is comparable to that reported in North American studies, suggesting the relationship is robust across cultural and institutional settings. The independent contribution of sleep quality beyond sleep duration is a noteworthy finding. Students who spend adequate time in bed but report fragmented or non-restorative sleep are still academically disadvantaged. This implies that intervention programmes should address sleep hygiene and sleep disorders, not merely encourage earlier bedtimes.",
+      "section_type": "results",
+      "chunk_index": 6,
+      "total_chunks": 9,
+      "page_number": 1,
+      "word_count": 89,
+      "char_count": 658
+    },
+    {
+      "chunk_id": "b93c7faa-cab4-4821-8f88-7346a04fee91",
+      "doc_id": "f3385c11-1093-4d08-b1cb-b9c681028753",
+      "content": "This study provides strong evidence that sleep deprivation negatively impacts academic performance among Nigerian university students. Both sleep duration and sleep quality are independent predictors of GPA. Universities should consider embedding sleep health education into orientation programmes, revising examination scheduling to avoid early morning slots, and providing access to evidence-based cognitive behavioural therapy for insomnia (CBT-I) through student wellness centres. Future research should employ longitudinal designs to establish causal directionality and examine the role of napping behaviour as a compensatory strategy.",
+      "section_type": "conclusion",
+      "chunk_index": 7,
+      "total_chunks": 9,
+      "page_number": 2,
+      "word_count": 81,
+      "char_count": 640
+    },
+    {
+      "chunk_id": "5d4f5949-faa3-4717-bb6c-79e9235fe786",
+      "doc_id": "f3385c11-1093-4d08-b1cb-b9c681028753",
+      "content": "[1] Buysse, D. J., Reynolds, C. F., Monk, T. H., Berman, S. R., & Kupfer, D. J. (1989). The Pittsburgh Sleep Quality Index: A new instrument for psychiatric practice and research. Psychiatry Research, 28(2), 193 213. [2] Curcio, G., Ferrara, M., & De Gennaro, L. (2006). Sleep loss, learning capacity and academic performance. Sleep Medicine Reviews, 10(5), 323 337. [3] Onyeka, I. N., & Obi, C. (2021). Sleep patterns and academic achievement among Nigerian undergraduates: A cross-sectional study. African Journal of Health Sciences, 34(1), 45 58. [4] Walker, M. (2017). Why We Sleep: Unlocking the Power of Sleep and Dreams. Scribner. [5] Lund, H. G., Reider, B. D., Whiting, A. B., & Prichard, J. R. (2010). Sleep patterns and predictors of disturbed sleep in a large population of college students. Journal of Adolescent Health, 46(2), 124 132.",
+      "section_type": "references",
+      "chunk_index": 8,
+      "total_chunks": 9,
+      "page_number": 2,
+      "word_count": 137,
+      "char_count": 849
+    }
+  ],
+  "chunk_count": 9,
+  "vector_index_path": "C:\\Users\\ADMIN\\PycharmProjects\\pdf_analyzer\\data\\vectorstore\\f3385c11-1093-4d08-b1cb-b9c681028753",
+  "error_message": null,
+  "created_at": "2026-03-17T16:03:47.766762",
+  "updated_at": "2026-03-17T16:04:35.977847"
+}

@@ -1,0 +1,24 @@
+[
+  {
+    "chunk_id": "459f960b-9c2f-482a-8283-f825affd556e",
+    "doc_id": "791f721c-cb51-47b9-b9bb-7def9937d00a",
+    "content": "- Accuracy: around 0.84 (exact may vary based on random seed) - Classification Report: includes precision, recall, and F1-score for each class - Confusion Matrix: helps visualize true/false positives and negatives 4. Screenshots of Flask Application Screenshot of the Flask web interface can be inserted here manually in the final document. 5. Reflection What Worked:",
+    "section_type": "results",
+    "chunk_index": 0,
+    "total_chunks": 2,
+    "page_number": 0,
+    "word_count": 55,
+    "char_count": 367
+  },
+  {
+    "chunk_id": "3897047e-fb3c-4375-a5e3-f9573f5557ef",
+    "doc_id": "791f721c-cb51-47b9-b9bb-7def9937d00a",
+    "content": "- Flask app allows user-friendly predictions - Form-based interface ensures easy input What Didn t: - Original model used too many features; had to retrain for compatibility with web UI - Ensuring input feature alignment required careful restructuring Future Improvements: - Add more features to improve accuracy - Implement model explainability (e.g., SHAP values) - Improve UI with dropdowns and data validation - Deploy online using services like Heroku or Render",
+    "section_type": "results",
+    "chunk_index": 1,
+    "total_chunks": 2,
+    "page_number": 0,
+    "word_count": 71,
+    "char_count": 466
+  }
+]
