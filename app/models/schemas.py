@@ -169,7 +169,7 @@ class SearchResult(BaseModel):
 
     chunk        : TextChunk
     score        : float  = Field(..., description="Similarity score (higher = more relevant)")
-    rank         : int    = Field(default=1, ge=1)
+    rank         : int    = Field(default=0, ge=0)  # <-- UPDATED: Changed ge=1 to ge=0
 
 
 class SearchResponse(BaseModel):
