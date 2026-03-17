@@ -18,9 +18,20 @@ PROCESSED_DIR   = DATA_DIR / "processed"
 VECTORSTORE_DIR = DATA_DIR / "vectorstore"
 LOGS_DIR        = BASE_DIR / "logs"
 
-# ── Load .env with absolute path ─────────────────────────────────────────────
+# ── Load .env (local development) ────────────────────────────────────────────
 _env_path = BASE_DIR / ".env"
 load_dotenv(dotenv_path=_env_path, override=True)
+
+# ── Load Streamlit secrets (Cloud deployment) ─────────────────────────────────
+# Streamlit secrets are NOT in os.environ by default — we copy them in manually.
+try:
+    import streamlit as st
+    if hasattr(st, "secrets") and len(st.secrets) > 0:
+        for _k, _v in st.secrets.items():
+            if isinstance(_v, str) and _k not in os.environ:
+                os.environ[_k] = _v
+except Exception:
+    pass  # Not running under Streamlit, or secrets not yet available
 
 # ── Ensure directories exist ──────────────────────────────────────────────────
 for _d in [UPLOAD_DIR, PROCESSED_DIR, VECTORSTORE_DIR, LOGS_DIR]:
