@@ -27,9 +27,9 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# ── Column order matching the For_Metadata.xlsx template ─────────────────────
+# ── Column order — "name original" first, then metadata ─────────────────────
 XLSX_COLUMNS = [
-    "title", "authors", "editor", "date", "page no",
+    "name original", "title", "authors", "editor", "date", "page no",
     "abstract", "sponsor", "citation", "doi", "issn",
     "publisher", "journal", "keywords", "type", "issue", "volume",
 ]
@@ -90,8 +90,8 @@ class ExportService:
 
         # ── Column widths ─────────────────────────────────────────────────────
         col_widths = {
-            "title": 45, "authors": 32, "abstract": 65, "journal": 35,
-            "keywords": 32, "doi": 32, "citation": 42, "publisher": 25,
+            "name original": 30, "title": 45, "authors": 36, "abstract": 65,
+            "journal": 35, "keywords": 32, "doi": 32, "citation": 42, "publisher": 25,
         }
         for col_i, col_name in enumerate(XLSX_COLUMNS, start=1):
             ws.column_dimensions[get_column_letter(col_i)].width = col_widths.get(col_name, 16)
@@ -277,11 +277,11 @@ class ExportService:
                 if not title:
                     title = _clean(doc.filename.replace(".pdf", ""))
 
-                # ── Authors ───────────────────────────────────────────────────
+                # ── Authors — separated by || ──────────────────────────────────
                 authors_list = [_clean(a) for a in (m.authors or []) if a.strip()]
                 if not authors_list:
                     authors_list = _fallback_authors(doc.full_text or "", title)
-                authors = "; ".join(authors_list)
+                authors = " || ".join(authors_list)
 
                 # ── Date ──────────────────────────────────────────────────────
                 # created_at is now a year string ("2016") from new extraction_service
@@ -314,9 +314,20 @@ class ExportService:
                 keywords = "; ".join(_clean(k) for k in kws if k.strip())
 
                 # ── Citation ──────────────────────────────────────────────────
-                citation = _build_citation(title, authors_list, date)
+                citation = _build_citation(
+                    title     = title,
+                    authors   = authors_list,
+                    date      = date,
+                    journal   = journal,
+                    volume    = volume,
+                    issue     = issue,
+                    pages     = str(m.page_count) if m.page_count else "",
+                    doi       = doi,
+                    publisher = publisher,
+                )
 
                 rows.append({
+                    "name original": doc.filename,   # original PDF filename
                     "title"    : title,
                     "authors"  : authors,
                     "editor"   : "",
@@ -389,20 +400,113 @@ def _parse_date(raw: str) -> str:
     return yr.group(0) if yr else raw[:10]
 
 
-def _build_citation(title: str, authors: list[str], date: str) -> str:
-    """Build an APA-style citation string."""
-    parts = []
+def _build_citation(
+    title     : str,
+    authors   : list[str],
+    date      : str,
+    journal   : str = "",
+    volume    : str = "",
+    issue     : str = "",
+    pages     : str = "",
+    doi       : str = "",
+    publisher : str = "",
+) -> str:
+    """
+    Build an APA 7th edition citation.
+
+    Journal article:
+      Adegbola, A. J., Soyinka, J. O., & Adeagbo, B. A. (2016).
+      Alteration of the disposition of quinine in healthy volunteers
+      after concurrent ciprofloxacin administration.
+      *American Journal of Therapeutics*, *23*(2), e398–e404.
+      https://doi.org/10.1097/MJT.0000000000000166
+
+    Book / report (no journal):
+      Adegbola, A. J. (2016). *Title of work*. Publisher.
+    """
+    parts: list[str] = []
+
+    # ── Authors ───────────────────────────────────────────────────────────────
     if authors:
-        author_str = "; ".join(authors[:3])
-        if len(authors) > 3:
-            author_str += " et al."
+        apa_authors = []
+        for a in authors[:20]:
+            a = a.strip()
+            if not a:
+                continue
+            if "," in a:
+                # Already "Last, First M." — use as-is
+                apa_authors.append(a)
+            else:
+                # "First [Middle] Last" → "Last, F. [M.]"
+                tokens   = a.split()
+                last     = tokens[-1]
+                initials = " ".join(f"{t[0]}." for t in tokens[:-1] if t)
+                apa_authors.append(f"{last}, {initials}" if initials else last)
+
+        if len(apa_authors) == 1:
+            author_str = apa_authors[0]
+        elif len(apa_authors) == 2:
+            author_str = f"{apa_authors[0]}, & {apa_authors[1]}"
+        elif len(apa_authors) <= 20:
+            author_str = ", ".join(apa_authors[:-1]) + f", & {apa_authors[-1]}"
+        else:
+            # APA 7: first 19 authors, ellipsis, last author
+            author_str = ", ".join(apa_authors[:19]) + f", ... {apa_authors[-1]}"
+
         parts.append(author_str)
+
+    # ── Year ──────────────────────────────────────────────────────────────────
+    year = (date[:4] if date and len(date) >= 4 else date) or ""
+    if year and re.match(r"^(19|20)\d{2}$", year):
+        parts.append(f"({year}).")
+    else:
+        parts.append("(n.d.).")
+
+    # ── Title — APA sentence case ─────────────────────────────────────────────
     if title:
-        parts.append(f'"{title}"')
-    if date:
-        year = date[:4] if len(date) >= 4 else date
-        parts.append(f"({year})")
-    return ". ".join(parts)
+        # Sentence case: lower everything then restore first letter + post-colon
+        # BUT preserve acronyms (all-caps tokens like HPLC, UV, DNA, COVID)
+        words = title.split()
+        cased = []
+        for i, word in enumerate(words):
+            # Strip punctuation for check
+            core = re.sub(r"[^A-Za-z]", "", word)
+            if core and core == core.upper() and len(core) >= 2:
+                # Acronym — keep as-is
+                cased.append(word)
+            elif i == 0:
+                # First word — capitalise
+                cased.append(word[0].upper() + word[1:].lower())
+            else:
+                cased.append(word.lower())
+        t = " ".join(cased)
+        # Re-capitalise first word after ": "
+        t = re.sub(r"(:\s+)([a-z])", lambda m: m.group(1) + m.group(2).upper(), t)
+        if journal:
+            parts.append(f"{t}.")               # article title — no italics
+        else:
+            parts.append(f"*{t}*.")             # book/report — italics
+
+    # ── Source ────────────────────────────────────────────────────────────────
+    if journal:
+        src = f"*{journal}*"                    # journal name in italics
+        if volume:
+            src += f", *{volume}*"              # volume in italics
+            if issue:
+                src += f"({issue})"             # issue in roman, parentheses
+        if pages:
+            src += f", {pages}"
+        src += "."
+        parts.append(src)
+    elif publisher:
+        parts.append(f"{publisher}.")
+
+    # ── DOI ───────────────────────────────────────────────────────────────────
+    if doi:
+        doi_url = doi if doi.startswith("http") else f"https://doi.org/{doi}"
+        parts.append(doi_url)
+
+    return " ".join(parts)
 
 
 def _fallback_authors(text: str, title: str) -> list[str]:
