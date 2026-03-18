@@ -12,6 +12,11 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+# Clear stale app.* module entries to prevent KeyError on Streamlit reruns
+_stale = [k for k in sys.modules if k == "app" or k.startswith("app.")]
+for _k in _stale:
+    del sys.modules[_k]
+
 import html
 import re
 import streamlit as st
