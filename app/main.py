@@ -48,7 +48,7 @@ st.set_page_config(
 # ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;500&family=Outfit:wght@300;400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;500&family=Outfit:wght@300;400;500;600&display=swap&font-display=swap');
 
 :root {
     --ink:       #0d0c0b;
@@ -65,9 +65,16 @@ st.markdown("""
 }
 
 html, body, [class*="css"] {
-    font-family: 'Outfit', sans-serif;
+    font-family: 'Outfit', system-ui, -apple-system, sans-serif;
     background: var(--paper);
     color: var(--ink);
+}
+.app-title, .doc-title, .meta-value-lg, .stat-value {
+    font-family: 'Lora', Georgia, 'Times New Roman', serif;
+}
+.app-subtitle, .stat-label, .meta-label, .result-section-tag,
+.result-score, [class*="Mono"] {
+    font-family: 'JetBrains Mono', 'Courier New', monospace;
 }
 
 /* Chrome removal */
