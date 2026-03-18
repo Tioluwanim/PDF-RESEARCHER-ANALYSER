@@ -86,13 +86,11 @@ header[data-testid="stHeader"] { background: transparent !important; }
     opacity:    1       !important;
     z-index:    99999   !important;
     pointer-events: auto !important;
-    position:   fixed   !important;
-    top:        0.75rem !important;
-    left:       0.75rem !important;
 }
 [data-testid="collapsedControl"] * {
     visibility: visible !important;
     pointer-events: auto !important;
+    color: var(--accent) !important;
 }
 
 /* Sidebar */
