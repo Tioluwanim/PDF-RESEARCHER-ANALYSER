@@ -1,30 +1,21 @@
 """
-extraction_service.py — Universal PDF extraction for any research paper/journal.
+extraction_service.py — Universal PDF extraction for ANY research/journal paper.
 
-Strategy (in priority order for each field):
-  Title   : 1) Largest font on page 1 (font-dict mode)
-             2) Reject garbage metadata (journal IDs, codes, short strings)
-             3) Text heuristic (first long line on page 1)
+Works across ALL major publishers and formats:
+  Elsevier · Springer · Wiley · Nature · BMJ · Sage · Oxford UP · Cambridge UP
+  Wolters Kluwer · PLOS · BioMed Central · Frontiers · MDPI · Hindawi
+  IEEE · ACM · ACS · RSC · APA · Taylor & Francis · Informa
+  arXiv preprints · African/Asian/Nigerian local journals
+  Two-column · Single-column · Conference proceedings · Theses
 
-  Authors : 1) PyMuPDF span-level scan below title on page 1
-             2) PDF metadata author field (often empty/wrong)
-             3) Text heuristic (proper-name lines after title)
-
-  Abstract: 1) Detected ABSTRACT section content
-             2) First paragraph-sized block after title/authors on page 1
-
-  DOI     : regex 10.XXXX/... anywhere in first 3 pages
-  ISSN    : regex XXXX-XXXX (labelled or bare) in first 3 pages
-  Volume/Issue: regex Vol/No patterns
-  Publisher: known publisher name patterns + "Published by"
-  Keywords : "Keywords:" labelled block in first 3 pages
-  Journal  : journal name patterns in first 3 pages
-
-Works across:
-  - Elsevier, Springer, Wiley, Taylor & Francis, Nature, BMJ, Sage,
-    Oxford/Cambridge UP, Wolters Kluwer, PLOS, BioMed Central,
-    arXiv preprints, IEEE, ACM, APA, ACS, APA, RSC, Frontiers,
-    MDPI, Hindawi, African/Nigerian/Asian journals (like Adeagbo_B2.pdf)
+Pipeline per document:
+  1. Extract raw text + font/block metadata via PyMuPDF dict mode
+  2. Resolve title  — font-size → metadata validation → text heuristic
+  3. Resolve authors — font-position → metadata field → text heuristic
+  4. Extract biblio  — DOI · ISSN · journal · publisher · volume · issue · year
+  5. Extract keywords + abstract
+  6. Detect sections — extended keyword set covering clinical, CS, social science
+  7. Sentence-aware sliding-window chunking with overlap
 """
 
 from __future__ import annotations
@@ -54,59 +45,108 @@ from app.utils.logger import get_logger, ServiceLogger
 
 logger = get_logger(__name__)
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-
+# ── Unicode / ligature normalisation map ─────────────────────────────────────
 _LIGATURES: dict[str, str] = {
     "\ufb01": "fi",  "\ufb02": "fl",  "\ufb00": "ff",
-    "\ufb03": "ffi", "\ufb04": "ffl", "\u2019": "'",
-    "\u2018": "'",   "\u201c": '"',   "\u201d": '"',
-    "\u2013": "-",   "\u2014": "--",  "\u00a0": " ",
-    "\u2022": "-",   "\u00b7": ".",   "\u00ad": "",   # soft hyphen
+    "\ufb03": "ffi", "\ufb04": "ffl",
+    "\u2019": "'",   "\u2018": "'",
+    "\u201c": '"',   "\u201d": '"',
+    "\u2013": "-",   "\u2014": "--",
+    "\u00a0": " ",   "\u00ad": "",      # non-breaking space, soft-hyphen
+    "\u2022": "-",   "\u00b7": ".",
+    "\u00d7": "x",   "\u03b1": "alpha", # common in science papers
+    "\u03b2": "beta","\u03bc": "mu",
 }
 
-# Patterns that indicate a line is NOT a title
+# ── Garbage title patterns ────────────────────────────────────────────────────
 _GARBAGE_TITLE = re.compile(
     r"""
-    ^\d+$                           # pure number
-    | ^https?://                    # URL
-    | ^[A-Z]{2,8}[-_]\d            # journal ID like AJT-201427
-    | ^\d{4}[-/]\d{2}              # date like 2016-02
-    | \.\.\d                        # page range like 398..404
-    | ^(vol|no|pp|issue)\b         # bibliographic code
-    | ^(doi|issn|isbn)\b           # metadata code
-    | copyright                     # copyright notice
-    | all rights reserved
-    | unauthorized reproduction
+    ^\d+$                              # pure number (page number)
+    |^[ivxlcdmIVXLCDM]+$             # roman numerals only
+    |^https?://                        # URL
+    |^[A-Z]{2,8}[-_]\d               # journal ID: AJT-201427, PLOS-2021
+    |^\d{4}[-/]\d{2}                  # date: 2016-02
+    |\.\.\d                            # page range: 398..404
+    |^(vol|no|pp|issue|page)\b        # bibliographic code
+    |^(doi|issn|isbn|pmid|pmcid)\b   # metadata code
+    |(copyright|all\s+rights\s+reserved|unauthorized\s+reproduction)
+    |^\s*\d+\s*$                      # whitespace-padded number
     """,
     re.IGNORECASE | re.VERBOSE,
 )
 
-# Markers that signal we've gone past the author block
+# ── Stop-words for author scanning ───────────────────────────────────────────
+# Signals we have passed the author block and entered affiliations/abstract
 _STOP_AUTHOR = re.compile(
     r"""
-    \b(university|universiti|college|institute|institution|faculty|
-    department|dept\.|school\s+of|division\s+of|
-    obafemi|awolowo|lagos|nigeria|ghana|kenya|south\s+africa|
-    greenville|carolina|london|oxford|cambridge|new\s+york|
-    abstract|introduction|background|keywords|received|accepted|
-    published|copyright|email|@|\bhttp|\bwww\b)
+    \b(
+        university|universiti|universidade|università|université|
+        universidad|universitaet|universität|
+        college|institute|institution|faculty|department|dept\b|
+        school\s+of|division\s+of|centre\s+of|center\s+of|
+        laboratory|lab\b|hospital|clinic|medical\s+center|
+        obafemi|awolowo|lagos|ibadan|nairobi|accra|pretoria|
+        johannesburg|kumasi|kampala|dar\s+es\s+salaam|
+        greenville|carolina|london|oxford|cambridge|new\s+york|
+        beijing|shanghai|tokyo|seoul|delhi|mumbai|
+        abstract|introduction|background|objective|purpose|
+        keywords?|key\s+words?|index\s+terms?|
+        received|accepted|published|revised|available\s+online|
+        correspondence|corresponding\s+author|
+        email|e-mail|tel\b|fax\b|@|\bhttp|\bwww\b|orcid
+    )\b
     """,
     re.IGNORECASE | re.VERBOSE,
 )
 
-# Known major publishers for extraction
+# ── Degree suffixes (for cleaning author strings) ────────────────────────────
+_DEGREES = re.compile(
+    r"\s*,?\s*\b("
+    r"MSc|M\.Sc|M\.S\.|MPhil|M\.Phil|"
+    r"PhD|Ph\.D|DPhil|D\.Phil|"
+    r"MD|M\.D|MBBS|MBChB|MBBCh|MBBChir|"
+    r"BSc|B\.Sc|B\.S\.|BA\b|B\.A\.|"
+    r"MPH|DrPH|MSPH|MHS|"
+    r"PharmD|Pharm\.D|BPharm|MPharm|"
+    r"FRCOG|FRCP|FRCPCH|FRCS|FACS|FRCPath|FRCPE|"
+    r"FMCPath|FWACP|FMCPH|"
+    r"DVM|DDS|DMD|MDS|BDS|"
+    r"MA\b|MBA|MEd|MPA|MFA|EdD|PsyD|ScD|DSc|DrSc|"
+    r"FCPS|MRCP|MRCOG|MCPath|"
+    r"I{1,3}|IV|[A-Z]{2,6}  # roman-numeral suffixes or unrecognised letter codes"
+    r")\b.*",
+    re.IGNORECASE,
+)
+
+# ── Known major publishers ────────────────────────────────────────────────────
 _KNOWN_PUBLISHERS = [
-    "Wolters Kluwer", "Elsevier", "Springer", "Wiley", "Taylor & Francis",
-    "Taylor and Francis", "Nature Publishing", "BMJ Publishing", "Sage Publications",
-    "Oxford University Press", "Cambridge University Press", "PLOS", "BioMed Central",
-    "Frontiers Media", "MDPI", "Hindawi", "IEEE", "ACM", "American Chemical Society",
-    "Royal Society of Chemistry", "American Psychological Association", "Karger",
-    "Lippincott", "Thieme", "Dove Medical", "Informa Healthcare",
+    "Wolters Kluwer", "Lippincott Williams",
+    "Elsevier", "Cell Press", "Lancet",
+    "Springer", "Springer Nature", "Nature Publishing",
+    "Wiley", "Wiley-Blackwell", "John Wiley",
+    "Taylor & Francis", "Taylor and Francis", "Informa Healthcare",
+    "BMJ Publishing", "BMJ Group",
+    "Sage Publications", "SAGE",
+    "Oxford University Press", "Cambridge University Press",
+    "PLOS", "Public Library of Science",
+    "BioMed Central", "BMC",
+    "Frontiers Media", "Frontiers in",
+    "MDPI", "Multidisciplinary Digital Publishing",
+    "Hindawi", "Dove Medical Press", "Dove Press",
+    "American Chemical Society", "ACS Publications",
+    "Royal Society of Chemistry", "RSC",
+    "American Psychological Association",
+    "IEEE", "ACM", "Association for Computing Machinery",
+    "Thieme", "Karger", "S. Karger",
+    "Mary Ann Liebert", "Future Medicine",
+    "African Journals Online", "AJOL",
+    "Asian Journal",
 ]
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
 class ExtractionService:
-    """Full PDF pipeline: extraction → section detection → chunking."""
+    """Full PDF pipeline: extraction → section detection → sentence-aware chunking."""
 
     def __init__(self) -> None:
         self._section_patterns = self._compile_section_patterns()
@@ -117,7 +157,7 @@ class ExtractionService:
 
     def process(self, doc: ProcessedDocument) -> ProcessedDocument:
         slog = ServiceLogger("extraction_service", doc_id=doc.doc_id)
-        slog.info("Starting extraction for '%s'", doc.filename)
+        slog.info("Extracting '%s'", doc.filename)
         try:
             doc.status = DocumentStatus.EXTRACTING
 
@@ -131,9 +171,9 @@ class ExtractionService:
 
             doc.chunks      = self._chunk_document(doc, slog)
             doc.chunk_count = len(doc.chunks)
-            slog.info("Generated %d chunks", doc.chunk_count)
+            slog.info("Chunks: %d", doc.chunk_count)
 
-            # Pull abstract into metadata if not already filled
+            # Fill abstract from section if metadata didn't capture it
             if not doc.metadata.abstract:
                 sec = doc.get_section(SectionType.ABSTRACT)
                 if sec:
@@ -161,23 +201,22 @@ class ExtractionService:
         if not pdf_path.exists():
             raise FileNotFoundError(f"PDF not found: {file_path}")
 
-        pages_text : list[str]  = []
-        font_sizes : list[float]= []
-        page0_blocks: list[dict]= []
+        pages_text:   list[str]   = []
+        font_sizes:   list[float] = []
+        page0_blocks: list[dict]  = []
         total_words = 0
 
         with fitz.open(str(pdf_path)) as pdf:
-            page_count = len(pdf)
-            raw_meta   = pdf.metadata or {}
-            meta_title  = _clean(raw_meta.get("title")        or "")
-            meta_author = _clean(raw_meta.get("author")       or "")
-            created     = (raw_meta.get("creationDate")       or "").strip()
-            subject     = _clean(raw_meta.get("subject")      or "")
-            keywords_m  = _clean(raw_meta.get("keywords")     or "")
+            page_count  = len(pdf)
+            raw_meta    = pdf.metadata or {}
+            meta_title  = _clean(raw_meta.get("title")    or "")
+            meta_author = _clean(raw_meta.get("author")   or "")
+            meta_kw     = _clean(raw_meta.get("keywords") or "")
+            created     = (raw_meta.get("creationDate")   or "").strip()
 
-            # Collect font/block data from first 3 pages
+            # Collect rich font/block data from first 3 pages
             for pn in range(min(3, page_count)):
-                blocks = pdf[pn].get_text("dict")["blocks"]
+                blocks = pdf[pn].get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)["blocks"]
                 if pn == 0:
                     page0_blocks = blocks
                 for block in blocks:
@@ -196,35 +235,24 @@ class ExtractionService:
                 pages_text.append(text)
                 total_words += len(text.split())
 
+        # Body font = most common size (used for heading detection)
         self._body_font_size = _modal(font_sizes) if font_sizes else 10.0
+
+        # Search space for bibliographic fields (first 3 pages)
         first3 = "\n".join(pages_text[:3])
 
-        # ── Title ─────────────────────────────────────────────────────────────
-        title = self._resolve_title(meta_title, page0_blocks, pages_text)
-
-        # ── Authors ───────────────────────────────────────────────────────────
-        authors = self._resolve_authors(meta_author, page0_blocks, pages_text, title)
-
-        # ── Bibliographic fields ───────────────────────────────────────────────
+        # ── Resolve fields ────────────────────────────────────────────────────
+        title     = self._resolve_title(meta_title, page0_blocks, pages_text)
+        authors   = self._resolve_authors(meta_author, page0_blocks, pages_text, title)
         doi       = _extract_doi(first3)
         issn      = _extract_issn(first3)
         publisher = _extract_publisher(first3)
-        journal   = _extract_journal(first3)
-        volume    = _extract_pattern(r"\bVol(?:ume)?\.?\s*(\d+)", first3)
-        issue     = _extract_pattern(
-            r"\bIssue\.?\s*(\d+)"
-            r"|\bNo\.?\s*(\d+)"
-            r"|\(\s*(\d+)\s*\)",
-            first3
-        )
-        keywords  = _extract_keywords_from_text(first3)
-
-        # Fall back to PDF metadata keywords if text had none
-        if not keywords and keywords_m:
-            keywords = [k.strip() for k in re.split(r"[;,]", keywords_m) if k.strip()]
-
-        # Abstract: try ABSTRACT section first, then first long paragraph on page 1
-        abstract = _extract_abstract_from_text(pages_text[0] if pages_text else "", title)
+        journal   = _extract_journal(first3, meta_title)
+        volume    = _extract_volume(first3)
+        issue     = _extract_issue(first3)
+        year      = _extract_year(first3, created)
+        keywords  = _extract_keywords(first3, meta_kw)
+        abstract  = _extract_abstract(pages_text[0] if pages_text else "")
 
         metadata = DocumentMetadata(
             title           = title,
@@ -239,17 +267,17 @@ class ExtractionService:
             issue           = issue,
             page_count      = page_count,
             word_count      = total_words,
-            created_at      = created,
+            created_at      = year or created,
             file_size_bytes = pdf_path.stat().st_size,
         )
 
         slog.info(
-            "Meta — title='%.55s' authors=%s doi=%s issn=%s",
-            title, [a[:20] for a in authors[:3]], doi, issn,
+            "title='%.50s' | authors=%d | doi=%s | issn=%s | journal='%.40s'",
+            title, len(authors), doi or "—", issn or "—", journal or "—",
         )
         return pages_text, metadata
 
-    # ── Title resolution ──────────────────────────────────────────────────────
+    # ── Title resolution (3-stage cascade) ───────────────────────────────────
 
     def _resolve_title(
         self,
@@ -257,19 +285,22 @@ class ExtractionService:
         page0_blocks : list[dict],
         pages_text   : list[str],
     ) -> str:
-        # Step 1: check if PDF metadata title is usable
-        if meta_title and len(meta_title) >= 20 and not _GARBAGE_TITLE.search(meta_title):
+        # Stage 1 — PDF metadata title (only if it looks like a real title)
+        if (meta_title
+                and len(meta_title) >= 20
+                and not _GARBAGE_TITLE.search(meta_title)
+                and meta_title.count(" ") >= 2):
             return meta_title
 
-        # Step 2: largest-font text on page 1
+        # Stage 2 — Largest-font span(s) on page 1
         font_title = _title_by_font(page0_blocks)
         if font_title and len(font_title) >= 15:
             return font_title
 
-        # Step 3: text heuristic — longest reasonable line in top third of page 1
+        # Stage 3 — Text heuristic: first substantial non-garbage line on page 1
         return _title_from_text(pages_text[0] if pages_text else "")
 
-    # ── Author resolution ─────────────────────────────────────────────────────
+    # ── Author resolution (3-stage cascade) ──────────────────────────────────
 
     def _resolve_authors(
         self,
@@ -278,18 +309,18 @@ class ExtractionService:
         pages_text   : list[str],
         title        : str,
     ) -> list[str]:
-        # Step 1: font-position scan on page 1 (most reliable)
+        # Stage 1 — Font+position scan below title on page 1
         font_authors = _authors_by_font(page0_blocks, title, self._body_font_size)
         if font_authors:
             return font_authors
 
-        # Step 2: PDF metadata author field
+        # Stage 2 — PDF metadata author field
         if meta_author:
             parsed = _parse_author_string(meta_author)
             if parsed:
                 return parsed
 
-        # Step 3: text heuristic
+        # Stage 3 — Text scan below title
         if pages_text:
             return _authors_from_text(pages_text[0], title)
 
@@ -309,18 +340,22 @@ class ExtractionService:
 
         for i, line in enumerate(lines):
             s = line.strip()
+            # Headings are short and not body text
             if not s or len(s) > 120:
+                continue
+            # Must have at least 2 chars and not be purely numeric
+            if re.match(r"^\d+\.?\s*$", s):
                 continue
             st = self._classify_heading(s)
             if not st:
                 continue
-            # Suppress same section type within 5 lines (handles duplicate headings)
+            # Suppress same section within 5 lines (catches duplicate headings)
             if i - seen.get(st, -99) < 5:
                 continue
             seen[st] = i
             hits.append((i, st, s))
 
-        slog.debug("Found %d headings: %s", len(hits), [h[1].value for h in hits])
+        slog.debug("Headings: %s", [(h[2], h[1].value) for h in hits])
 
         sections: list[DocumentSection] = []
         for idx, (li, st, heading) in enumerate(hits):
@@ -340,7 +375,7 @@ class ExtractionService:
             ))
 
         if not sections:
-            slog.warning("No sections — treating full document as one section")
+            slog.warning("No sections detected — full document as one chunk")
             sections.append(DocumentSection(
                 section_type = SectionType.OTHER,
                 title        = "Full Document",
@@ -353,53 +388,90 @@ class ExtractionService:
 
     def _classify_heading(self, line: str) -> SectionType | None:
         norm = line.lower().strip().rstrip(".:")
-        # Strip leading section numbers: "1.", "2.1", "II.", "A."
-        norm = re.sub(r"^(\d+(\.\d+)*\.?|[IVX]+\.|[A-Z]\.)\s+", "", norm)
+        # Strip leading numbering: "1.", "2.1", "II.", "A.", "1.2.3"
+        norm = re.sub(r"^(\d+(\.\d+)*\.?|[IVX]+\.|[A-Z]\.)[\s\u00a0]+", "", norm)
+        # Also handle bold markers sometimes left in text: "**Introduction**"
+        norm = norm.strip("*_").strip()
         for st, pattern in self._section_patterns.items():
             if pattern.search(norm):
                 return st
         return None
 
     def _compile_section_patterns(self) -> dict[SectionType, re.Pattern]:
-        # Extended keyword sets for broad journal compatibility
+        """
+        Extended section keyword sets covering all major paper types:
+        clinical, pharmacology, chemistry, CS/AI, social science,
+        economics, education, engineering, environmental science.
+        """
         extended: dict[str, list[str]] = {
             "abstract": [
-                "abstract", "summary", "overview", "synopsis",
-                "précis", "highlights",
+                "abstract", "summary", "executive summary", "overview",
+                "synopsis", "précis", "highlights", "graphical abstract",
+                "lay summary", "plain language summary",
             ],
             "introduction": [
-                "introduction", "background", "motivation",
-                "problem statement", "rationale", "context",
-                "general introduction", "study rationale",
+                "introduction", "background", "motivation", "rationale",
+                "context", "problem statement", "general introduction",
+                "study rationale", "scope", "overview", "preface",
+                "aims and objectives", "objectives", "aim of the study",
             ],
             "methods": [
+                # Generic
                 "methods", "methodology", "materials and methods",
+                "methods and materials",
+                # Experimental
                 "experimental", "experimental section", "experimental setup",
+                "experimental design", "experimental procedure",
+                # Clinical/Medical
                 "patients and methods", "subjects and methods",
                 "study design", "study population", "participants",
-                "data collection", "data analysis", "statistical analysis",
-                "drug analysis", "analytical methods", "procedure",
-                "proposed method", "approach",
+                "study participants", "inclusion criteria",
+                "exclusion criteria", "ethical approval",
+                # Data
+                "data collection", "data sources", "data analysis",
+                "statistical analysis", "statistical methods",
+                "statistical approach",
+                # Engineering/CS
+                "system design", "proposed method", "proposed approach",
+                "proposed framework", "model", "algorithm", "implementation",
+                "architecture",
+                # Lab/Chemistry
+                "drug analysis", "analytical methods", "sample preparation",
+                "instrumentation", "chromatographic conditions",
+                "synthesis", "preparation",
+                # Other
+                "procedure", "approach", "protocol",
             ],
             "results": [
-                "results", "findings", "experiments", "evaluation",
-                "experimental results", "outcomes", "observations",
+                "results", "findings", "outcomes", "observations",
+                "experimental results", "simulation results",
+                "numerical results", "empirical results",
                 "pharmacokinetic results", "clinical results",
+                "performance evaluation", "evaluation", "experiments",
+                "case study", "case studies",
             ],
             "discussion": [
-                "discussion", "analysis", "interpretation",
-                "results and discussion", "discussion and conclusion",
-                "general discussion",
+                "discussion", "general discussion",
+                "results and discussion", "results and analysis",
+                "analysis and discussion",
+                "discussion and conclusion", "discussion and conclusions",
+                "interpretation", "analysis",
             ],
             "conclusion": [
                 "conclusion", "conclusions", "concluding remarks",
-                "summary", "summary and conclusion", "final remarks",
-                "future work", "limitations", "study limitations",
-                "implications",
+                "concluding thoughts",
+                "summary and conclusion", "summary and conclusions",
+                "final remarks", "closing remarks",
+                "summary", "overview",
+                "future work", "future directions", "future research",
+                "limitations", "study limitations", "limitations of the study",
+                "implications", "clinical implications", "policy implications",
+                "recommendations", "practical implications",
             ],
             "references": [
                 "references", "bibliography", "works cited",
-                "literature cited", "citations",
+                "literature cited", "citations", "sources",
+                "reference list",
             ],
         }
         type_map = {
@@ -413,12 +485,13 @@ class ExtractionService:
         }
         patterns: dict[SectionType, re.Pattern] = {}
         for key, st in type_map.items():
-            # Merge config keywords with extended defaults
+            # Merge config keywords with extended (config takes priority)
             kws = list(dict.fromkeys(
                 SECTION_KEYWORDS.get(key, []) + extended.get(key, [])
             ))
             if not kws:
                 continue
+            # Sort longest first so multi-word phrases match before single words
             alts = "|".join(re.escape(k) for k in sorted(kws, key=len, reverse=True))
             patterns[st] = re.compile(
                 rf"(?:^|\b)({alts})(?:\b|$|:|\s)",
@@ -444,7 +517,7 @@ class ExtractionService:
             c.chunk_index  = i
             c.total_chunks = len(chunks)
 
-        slog.debug("Chunked: %d (size=%d overlap=%d)", len(chunks), CHUNK_SIZE, CHUNK_OVERLAP)
+        slog.debug("Chunked: %d (CHUNK_SIZE=%d OVERLAP=%d)", len(chunks), CHUNK_SIZE, CHUNK_OVERLAP)
         return chunks
 
     def _chunk_text(
@@ -458,9 +531,9 @@ class ExtractionService:
         if not sents:
             return []
 
-        chunks: list[TextChunk] = []
-        current: list[str]      = []
-        cur_len: int            = 0
+        chunks:  list[TextChunk] = []
+        current: list[str]       = []
+        cur_len: int             = 0
 
         for sent in sents:
             sw = len(sent.split())
@@ -472,10 +545,11 @@ class ExtractionService:
                         content=ct, section_type=section_type,
                         page_number=page_number,
                     ))
+                # Carry-over overlap words
                 all_words = " ".join(current).split()
-                carry   = all_words[-CHUNK_OVERLAP:] if len(all_words) > CHUNK_OVERLAP else all_words
-                current = [" ".join(carry)]
-                cur_len = len(carry)
+                carry     = all_words[-CHUNK_OVERLAP:] if len(all_words) > CHUNK_OVERLAP else all_words
+                current   = [" ".join(carry)]
+                cur_len   = len(carry)
             current.append(sent)
             cur_len += sw
 
@@ -495,27 +569,27 @@ class ExtractionService:
     def _clean_page_text(text: str) -> str:
         for bad, good in _LIGATURES.items():
             text = text.replace(bad, good)
-        text = unescape(text)
-        text = re.sub(r"(\w)-\n(\w)", r"\1\2", text)      # hyphenated line breaks
-        text = re.sub(r"[^\x20-\x7E\n]", " ", text)       # non-printable
-        text = re.sub(r"\n{3,}", "\n\n", text)              # excess blank lines
-        text = re.sub(r"[ \t]{2,}", " ", text)              # excess spaces
+        text = unescape(text)                                   # HTML entities
+        text = re.sub(r"(\w)-\n(\w)", r"\1\2", text)           # hyphenated line breaks
+        text = re.sub(r"[^\x20-\x7E\n]", " ", text)            # non-printable
+        text = re.sub(r"\n{3,}", "\n\n", text)                  # excess blank lines
+        text = re.sub(r"[ \t]{2,}", " ", text)                  # excess spaces
         return text.strip()
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# Module-level helper functions
-# ═════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
+# Module-level helpers — pure functions, fully tested independently
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def _clean(text: str) -> str:
     return unescape(text).strip()
 
 
 def _modal(sizes: list[float]) -> float:
-    """Most common font size (body text baseline)."""
+    """Most common font size = body text baseline."""
     buckets: dict[float, int] = {}
     for s in sizes:
-        k = round(s * 2) / 2
+        k = round(s * 2) / 2       # quantise to 0.5pt
         buckets[k] = buckets.get(k, 0) + 1
     return max(buckets, key=lambda k: buckets[k]) if buckets else 10.0
 
@@ -529,11 +603,15 @@ def _estimate_page(char_offset: int, pages_text: list[str]) -> int:
     return max(0, len(pages_text) - 1)
 
 
-# ── Title extraction ──────────────────────────────────────────────────────────
+# ── Title ─────────────────────────────────────────────────────────────────────
 
 def _title_by_font(blocks: list[dict]) -> str:
-    """Largest-font text on page 1 = title."""
-    spans: list[tuple[float, float, str]] = []  # (y, size, text)
+    """
+    Extract title from page 1 by collecting all spans at/near the maximum
+    font size, sorted by vertical position (top → bottom).
+    Research paper titles are almost always the biggest text on page 1.
+    """
+    spans: list[tuple[float, float, str]] = []   # (y, size, text)
     for block in blocks:
         if block.get("type") != 0:
             continue
@@ -548,124 +626,149 @@ def _title_by_font(blocks: list[dict]) -> str:
     if not spans:
         return ""
 
-    max_size = max(s[1] for s in spans)
-    threshold = max_size * 0.92  # allow slight size variation within same title
+    max_size  = max(s for _, s, _ in spans)
+    threshold = max_size * 0.91   # ±9% to catch title lines in same font
 
-    # Collect all spans at max size, in vertical order
+    # Keep spans at max size, in vertical (top-to-bottom) order
     title_spans = sorted(
         [(y, t) for y, s, t in spans if s >= threshold],
         key=lambda x: x[0],
     )
 
-    # Only take spans in the top 40% of the page height
-    if title_spans:
-        page_height = max(y for y, _, _ in spans) or 800
-        title_spans = [(y, t) for y, t in title_spans if y <= page_height * 0.45]
+    # Only within the top 45% of page height (titles don't appear at the bottom)
+    page_h = max(y for y, _, _ in spans) or 800
+    title_spans = [(y, t) for y, t in title_spans if y <= page_h * 0.45]
 
     if not title_spans:
         return ""
 
     title = " ".join(t for _, t in title_spans).strip()
 
-    # Reject if it looks like garbage
     if _GARBAGE_TITLE.search(title) or len(title) < 15:
         return ""
-
     return _clean(title[:300])
 
 
 def _title_from_text(first_page: str) -> str:
-    """Heuristic: first substantial line that isn't garbage."""
+    """
+    Heuristic fallback: first substantial line (≥15 chars, ≥3 words,
+    not garbage) on page 1.
+    """
     for line in first_page.split("\n"):
         s = line.strip()
-        if len(s) < 15 or len(s) > 300:
+        if len(s) < 15 or len(s) > 350:
             continue
         if s.count(" ") < 2:
             continue
         if _GARBAGE_TITLE.search(s):
             continue
-        if re.match(r"^\d", s):
+        if re.match(r"^\d", s):         # starts with digit (page number, date)
             continue
         return _clean(s)
     return ""
 
 
-# ── Author extraction ─────────────────────────────────────────────────────────
+# ── Authors ───────────────────────────────────────────────────────────────────
 
 def _clean_author(raw: str) -> str:
-    """Normalize a single author name: strip degrees, superscripts, symbols."""
+    """
+    Normalise one author token:
+      - Strip academic degree suffixes and everything after them
+      - Strip numeric/symbol superscripts (affiliation markers)
+      - Strip leading 'and', trailing punctuation
+    """
     name = _clean(raw)
-    # Strip trailing degree qualifiers and everything after
-    name = re.sub(
-        r"\s*,?\s*\b(MSc|M\.Sc|PhD|Ph\.D|MD|M\.D|BSc|B\.Sc|MBChB|MPH|"
-        r"DrPH|PharmD|MBBS|MPharm|BPharm|FRCOG|FRCP|FACS|FRCPath|"
-        r"DVM|DDS|DMD|MDS|MA|MBA|MEd|MPA|MFA|EdD|PsyD|ScD|DSc)\b.*",
-        "", name, flags=re.IGNORECASE,
-    )
-    # Strip numeric superscripts: "1", "1,2", ",1,2*"
-    name = re.sub(r"[,\s]*[\d,]+\*?\s*$", "", name)
-    # Strip leading "and"
+    # Strip degrees and everything after
+    name = _DEGREES.sub("", name)
+    # Strip numeric affiliation superscripts: ",1,2*" at end
+    name = re.sub(r"[,\s]*[\d,]+[*†‡§]*\s*$", "", name)
+    # Strip leading "and "
     name = re.sub(r"^and\s+", "", name, flags=re.IGNORECASE)
-    # Strip symbols
-    name = name.strip(" *†‡§,.")
+    # Strip surrounding symbols
+    name = name.strip(" *†‡§,.;:")
     return name.strip()
 
 
 def _is_author_name(s: str) -> bool:
-    """True if string looks like a proper author name."""
+    """
+    Validate that a token is a plausible human author name.
+    Returns False for headings, institutions, degrees, URLs, etc.
+    """
     s = s.strip()
-    if len(s) < 4 or len(s) > 50:
+    if len(s) < 4 or len(s) > 60:
         return False
-    # Must start with capital letter
-    if not re.match(r"^[A-Z]", s):
+    if not re.match(r"^[A-Z]", s):          # must start with capital
         return False
-    # Must have at least one lowercase letter (not ALL CAPS like a heading)
-    if s == s.upper():
+    if s == s.upper() and len(s) > 6:       # ALL CAPS = heading/acronym
         return False
-    # Must not be a standalone degree or institution word
+    if not re.search(r"[a-z]", s):          # must have lowercase
+        return False
     if _STOP_AUTHOR.search(s):
         return False
-    if re.match(r"^(PhD|MSc|MD|BSc|MBChB|Dr|Prof|Mr|Mrs)\d*\.?$", s, re.IGNORECASE):
+    # Reject lone degree tokens
+    if re.match(
+        r"^(PhD|MSc|MD|BSc|MBChB|MBBS|Dr|Prof|Mr|Mrs|Ms|"
+        r"FRCOG|FRCP|FACS|FRCPath|FWACP)\d*\.?$",
+        s, re.IGNORECASE,
+    ):
         return False
+    # Must contain at least one space OR an initial (e.g. "J. Smith", "Adegbola")
+    # Single-token surnames without initials are valid in some cultures
     return True
 
 
 def _parse_author_string(author_str: str) -> list[str]:
-    """Parse PDF metadata author string into list of clean names."""
+    """
+    Parse the PDF metadata 'author' field into a clean list.
+    Handles: semicolons, 'and', comma-separated, 'Last, First' format.
+    """
     if not author_str:
         return []
-    # Split on semicolons, " and ", commas (careful: "Last, First" format)
-    # Try semicolons first (most unambiguous)
+
+    # Prefer semicolons (unambiguous)
     if ";" in author_str:
-        parts = [p.strip() for p in author_str.split(";")]
+        parts = author_str.split(";")
     elif " and " in author_str.lower():
         parts = re.split(r"\s+and\s+", author_str, flags=re.IGNORECASE)
     else:
-        parts = [p.strip() for p in author_str.split(",")]
+        # Comma split is risky ("Last, First"), only do it if parts look like names
+        parts = author_str.split(",")
+        # Heuristic: if every part starts with capital, treat as separate names
+        caps = [p.strip() for p in parts if p.strip()]
+        if all(re.match(r"^[A-Z]", p) for p in caps) and len(caps) <= 10:
+            pass   # use as-is
+        else:
+            # Likely "Last, First Middle" format — treat whole string as one author
+            parts = [author_str]
 
-    result = []
+    result: list[str] = []
+    seen:   set[str]  = set()
     for p in parts:
-        cleaned = _clean_author(p)
-        if cleaned and len(cleaned) > 3:
-            result.append(cleaned)
+        c = _clean_author(p)
+        if c and len(c) > 3 and c.lower() not in seen:
+            seen.add(c.lower())
+            result.append(c)
     return result[:10]
 
 
 def _authors_by_font(
-    blocks      : list[dict],
-    title       : str,
-    body_size   : float,
+    blocks    : list[dict],
+    title     : str,
+    body_size : float,
 ) -> list[str]:
     """
-    Font-position based author extraction.
-    Scans spans vertically below the title region on page 1.
-    Authors are medium-sized text (between body and title size),
-    appearing within ~250pt below the title area.
+    Font+position based author extraction.
+
+    Logic:
+      1. Flatten all spans on page 1 with (y, x, size, text)
+      2. Locate the bottom of the title region
+      3. Scan downward for spans in the "author zone" (below title, above affiliations)
+      4. Author spans are smaller than title but often larger than body,
+         contain proper-name-shaped tokens
     """
     if not blocks:
         return []
 
-    # Flatten all spans with position info
     all_spans: list[tuple[float, float, float, str]] = []  # (y, x, size, text)
     for block in blocks:
         if block.get("type") != 0:
@@ -675,7 +778,7 @@ def _authors_by_font(
             for span in line.get("spans", []):
                 t = _clean(span.get("text", "").strip())
                 s = span.get("size", 0.0)
-                x = span.get("bbox", [0])[0] if span.get("bbox") else 0
+                x = span.get("bbox", [0, 0, 0, 0])[0]
                 if t and s > 0:
                     all_spans.append((ly, x, s, t))
 
@@ -685,63 +788,68 @@ def _authors_by_font(
     all_spans.sort(key=lambda sp: (sp[0], sp[1]))
     max_size = max(sp[2] for sp in all_spans)
 
-    # Find bottom y of title region
-    title_low = title[:25].lower() if title else ""
+    # Locate title bottom — scan for a span containing start of title text
+    title_prefix = title[:20].lower() if title else ""
     title_bottom = 0.0
     for y, x, size, text in all_spans:
-        if title_low and title_low in text.lower():
-            title_bottom = y + 30  # a little below the title line
+        if title_prefix and title_prefix in text.lower():
+            title_bottom = y + 20   # just below this line
             break
-    # If title not found by text match, use top 25% of page
     if title_bottom == 0.0:
-        page_h = max(sp[0] for sp in all_spans) or 800
-        title_bottom = page_h * 0.15
+        # Fallback: use top 18% of page
+        page_h       = max(sp[0] for sp in all_spans) or 842
+        title_bottom = page_h * 0.18
 
+    # Scan for author names in the zone below the title
     candidates: list[str] = []
+    no_author_streak = 0
+
     for y, x, size, text in all_spans:
         if y < title_bottom:
             continue
-        if y > title_bottom + 280:
+        if y > title_bottom + 320:      # stop after 320pt below title bottom
+            break
+        if _STOP_AUTHOR.search(text):   # hit institution / abstract marker
             break
 
-        # Hard stop at institutional/abstract markers
-        if _STOP_AUTHOR.search(text):
-            break
-
-        # Skip title-sized spans (still part of title continuation)
-        if size >= max_size * 0.88:
+        # Skip title-sized text (multi-line title continuation)
+        if size >= max_size * 0.87:
             continue
 
-        # Split on common author separators
-        parts = [p.strip() for p in re.split(r"[,;]|(?<=[a-z])\s+and\s+", text, flags=re.IGNORECASE)]
+        # Split on common separators and try each token
+        parts = re.split(r"[,;]|(?<=[a-z])\s+and\s+(?=[A-Z])", text, flags=re.IGNORECASE)
+        found_here = 0
         for part in parts:
             cleaned = _clean_author(part)
             if _is_author_name(cleaned):
                 candidates.append(cleaned)
-                if len(candidates) >= 10:
+                found_here += 1
+                if len(candidates) >= 12:
                     break
-        if len(candidates) >= 10:
+
+        if found_here == 0:
+            no_author_streak += 1
+            if no_author_streak >= 3 and len(candidates) > 0:
+                break   # 3 consecutive non-author lines after finding some = stop
+        else:
+            no_author_streak = 0
+
+        if len(candidates) >= 12:
             break
 
-    # Deduplicate while preserving order
-    seen: set[str] = set()
-    result = []
-    for c in candidates:
-        if c.lower() not in seen:
-            seen.add(c.lower())
-            result.append(c)
-    return result[:10]
+    return _dedupe(candidates)[:10]
 
 
 def _authors_from_text(first_page: str, title: str) -> list[str]:
     """
-    Text-based author extraction: scan lines just after title on page 1.
+    Text-based author extraction: scan lines after the title.
     Handles multi-author lines with degree suffixes and superscripts.
     """
-    lines = [l.strip() for l in first_page.split("\n") if l.strip()]
-    candidates: list[str] = []
+    lines       = [l.strip() for l in first_page.split("\n") if l.strip()]
+    candidates  : list[str] = []
     title_found = False
     title_low   = title[:30].lower() if title else ""
+    no_auth_streak = 0
 
     for line in lines:
         if not title_found:
@@ -752,164 +860,309 @@ def _authors_from_text(first_page: str, title: str) -> list[str]:
         if _STOP_AUTHOR.search(line):
             break
 
-        # Split aggressively on separators
-        parts = re.split(r"[,;]|(?<=\w)\s+and\s+(?=[A-Z])", line, flags=re.IGNORECASE)
-        found_in_line = 0
+        parts = re.split(
+            r"[,;]|(?<=\w)\s+and\s+(?=[A-Z])",
+            line, flags=re.IGNORECASE,
+        )
+        found_here = 0
         for part in parts:
             cleaned = _clean_author(part)
             if _is_author_name(cleaned):
                 candidates.append(cleaned)
-                found_in_line += 1
-                if len(candidates) >= 10:
+                found_here += 1
+                if len(candidates) >= 12:
                     break
-        if len(candidates) >= 10:
+
+        if found_here == 0:
+            no_auth_streak += 1
+            if no_auth_streak >= 3 and len(candidates) > 0:
+                break
+        else:
+            no_auth_streak = 0
+
+        if len(candidates) >= 12:
             break
-        # Stop scanning after 4 consecutive lines with no authors
-        if found_in_line == 0 and len(candidates) > 0:
-            break
 
-    # Deduplicate
-    seen: set[str] = set()
-    result = []
-    for c in candidates:
-        if c.lower() not in seen:
-            seen.add(c.lower())
-            result.append(c)
-    return result[:10]
+    return _dedupe(candidates)[:10]
 
 
-# ── Abstract extraction ───────────────────────────────────────────────────────
+def _dedupe(items: list[str]) -> list[str]:
+    """Deduplicate while preserving order, case-insensitive."""
+    seen:   set[str]  = set()
+    result: list[str] = []
+    for item in items:
+        key = item.lower()
+        if key not in seen:
+            seen.add(key)
+            result.append(item)
+    return result
 
-def _extract_abstract_from_text(first_page: str, title: str) -> str:
+
+# ── Abstract ──────────────────────────────────────────────────────────────────
+
+def _extract_abstract(first_page: str) -> str:
     """
-    Try to extract abstract text from page 1.
-    Looks for 'Abstract' heading, or falls back to first substantial paragraph
-    that appears after the author block.
-    """
-    text = first_page
+    Extract the abstract from page 1 text.
 
-    # Pattern 1: explicit Abstract label
+    Tries in order:
+      1. Explicit 'Abstract' / 'Summary' label followed by text
+      2. First substantial paragraph after the author block
+    """
+    # Strategy 1: labelled abstract
     m = re.search(
-        r"\bAbstract\b[:\s]*\n?([\s\S]{80,2000?}?)(?=\n\s*\n|\bKeywords?\b|\bIntroduction\b|\bBackground\b)",
-        text, re.IGNORECASE,
+        r"\b(?:Abstract|Summary|Overview|Synopsis)\b\s*[:—]?\s*\n?"
+        r"([\s\S]{80,2500}?)"
+        r"(?=\n\s*\n\s*(?:Keywords?|Key\s+words?|Index\s+terms?|"
+        r"Introduction|Background|1\.|I\.|$))",
+        first_page, re.IGNORECASE,
     )
     if m:
         return _clean(m.group(1))[:2000]
 
-    # Pattern 2: first long paragraph after a blank line (likely the abstract body)
-    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if len(p.strip()) > 100]
-    # Skip the first 1-2 (likely title + author block)
-    for para in paragraphs[1:4]:
-        if len(para) > 100 and not _STOP_AUTHOR.search(para[:80]):
+    # Strategy 2: first long paragraph (skip title + author block = first 2 paras)
+    paragraphs = [
+        p.strip() for p in re.split(r"\n\s*\n", first_page)
+        if len(p.strip()) > 120
+    ]
+    for para in paragraphs[1:5]:
+        # Skip if it looks like an affiliation block
+        if _STOP_AUTHOR.search(para[:100]):
+            continue
+        if len(para) > 120:
             return _clean(para[:2000])
 
     return ""
 
 
-# ── Bibliographic field extractors ────────────────────────────────────────────
+# ── DOI ───────────────────────────────────────────────────────────────────────
 
 def _extract_doi(text: str) -> str:
-    """Extract DOI — standard 10.XXXX/... format."""
-    m = re.search(r"\b(10\.\d{4,9}/[^\s\"'<>\]\)]+)", text, re.IGNORECASE)
-    return m.group(1).rstrip(".,;)]") if m else ""
+    """
+    Extract DOI. Handles:
+      - 10.XXXX/suffix (standard)
+      - doi: 10.XXXX/suffix (labelled)
+      - https://doi.org/10.XXXX/suffix (URL form)
+    """
+    # URL form first (most explicit)
+    m = re.search(r"https?://(?:dx\.)?doi\.org/(10\.\d{4,9}/[^\s\"'<>\]\)]+)", text)
+    if m:
+        return m.group(1).rstrip(".,;)]")
 
+    # Labelled form
+    m = re.search(r"\bdoi\s*:?\s*(10\.\d{4,9}/[^\s\"'<>\]\)]+)", text, re.IGNORECASE)
+    if m:
+        return m.group(1).rstrip(".,;)]")
+
+    # Bare form
+    m = re.search(r"\b(10\.\d{4,9}/[^\s\"'<>\]\)]{3,})", text)
+    if m:
+        return m.group(1).rstrip(".,;)]")
+
+    return ""
+
+
+# ── ISSN ──────────────────────────────────────────────────────────────────────
 
 def _extract_issn(text: str) -> str:
-    """Extract ISSN — XXXX-XXXX format, labelled or bare."""
-    # Labelled first (most reliable)
-    m = re.search(r"\bE?-?ISSN[:\s]*(\d{4}-\d{3}[\dXx])\b", text, re.IGNORECASE)
+    """
+    Extract ISSN (print or online). Format: XXXX-XXXX.
+    Tries labelled forms first, then context-aware bare search.
+    """
+    # E-ISSN or P-ISSN labelled
+    m = re.search(r"\b[EP]-?ISSN[:\s]*(\d{4}-\d{3}[\dXx])\b", text, re.IGNORECASE)
     if m:
         return m.group(1)
+    # ISSN labelled
     m = re.search(r"\bISSN[:\s]*(\d{4}-\d{3}[\dXx])\b", text, re.IGNORECASE)
     if m:
         return m.group(1)
-    # Bare ISSN after journal name or copyright line
-    m = re.search(r"(?:journal|issn|copyright)[^\n]*\b(\d{4}-\d{3}[\dXx])\b", text, re.IGNORECASE)
+    # ISSN on same line as "journal" or "copyright"
+    m = re.search(
+        r"(?:journal|issn|copyright|published)[^\n]*\b(\d{4}-\d{3}[\dXx])\b",
+        text, re.IGNORECASE,
+    )
     if m:
         return m.group(1)
-    # Last resort: bare pattern (higher false-positive risk, so only in first 1000 chars)
-    m = re.search(r"\b(\d{4}-\d{3}[\dXx])\b", text[:1000])
+    # Bare ISSN in first 1500 chars (low confidence, last resort)
+    m = re.search(r"\b(\d{4}-\d{3}[\dXx])\b", text[:1500])
     return m.group(1) if m else ""
 
 
+# ── Publisher ─────────────────────────────────────────────────────────────────
+
 def _extract_publisher(text: str) -> str:
-    """Extract publisher name from known list or explicit label."""
+    """
+    Extract publisher from:
+      1. Explicit "Published by" / "Publisher:" label
+      2. Known publisher name in first 4000 chars
+    """
+    chunk = text[:4000]
+
     # Explicit label
-    m = re.search(r"(?:Published\s+by|Publisher\s*:)\s*([A-Z][^\n]{3,70})", text[:4000])
+    m = re.search(
+        r"(?:Published\s+by|Publisher\s*:)\s*([A-Z][^\n]{3,80})",
+        chunk, re.IGNORECASE,
+    )
     if m:
-        pub = re.split(r"\s*[,.]?\s*(?:Inc\.|Ltd\.?|All rights|Copyright|\d{4})", m.group(1))[0]
+        pub = m.group(1)
+        pub = re.split(r"\s*[,.]?\s*(?:Inc\.|Ltd\.?|LLC|All rights|Copyright|\d{4})", pub)[0]
         return pub.strip()[:80]
 
-    # Known publisher names
-    for pub in _KNOWN_PUBLISHERS:
-        if pub.lower() in text[:4000].lower():
+    # Known publisher names (longest match first to avoid partial matches)
+    chunk_l = chunk.lower()
+    for pub in sorted(_KNOWN_PUBLISHERS, key=len, reverse=True):
+        if pub.lower() in chunk_l:
             return pub
 
     return ""
 
 
-def _extract_journal(text: str) -> str:
-    """Extract journal name from common patterns."""
+# ── Journal ───────────────────────────────────────────────────────────────────
+
+def _extract_journal(text: str, meta_title: str = "") -> str:
+    """
+    Extract journal name. Tries multiple patterns then cleans the result.
+    Also checks if the PDF metadata 'title' looks like a journal name
+    (e.g. Elsevier often puts the journal in the title field).
+    """
+    chunk = text[:5000]
+
     patterns = [
-        # "Published in: Journal Name"
-        r"(?:published\s+in|journal\s*:)\s*([A-Z][^\n]{5,80})",
-        # "Journal of X" / "International Journal of X"
-        r"((?:International\s+)?(?:Journal|Review|Annals|Archives|Bulletin|"
-        r"Proceedings|Transactions|Letters)\s+(?:of|for|on)\s+[A-Z][^\n]{3,60})",
-        # Specific patterns like "American Journal of Therapeutics"
-        r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,5}\s+Journal[^\n]{0,30})",
-        # "Asian Journal of ..."
-        r"(Asian Journal of [^\n]{5,60})",
-        r"(American Journal of [^\n]{5,60})",
-        r"(British Journal of [^\n]{5,60})",
-        r"(European Journal of [^\n]{5,60})",
+        # Explicit label
+        r"(?:Published\s+in|Journal\s*:)\s*([A-Z][^\n]{5,100})",
+        # "Journal of X" — full form
+        r"((?:International\s+|European\s+|American\s+|British\s+|African\s+|"
+        r"Asian\s+|Canadian\s+|Australian\s+|Indian\s+)?"
+        r"(?:Journal|Review|Annals|Archives|Bulletin|Proceedings|Transactions|"
+        r"Letters|Reports|Advances|Frontiers|Perspectives|Current)\s+"
+        r"(?:of|for|on|in)\s+[A-Z][^\n]{3,70})",
+        # "[Word]+ Journal" pattern
+        r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,6}\s+Journal[^\n]{0,30})",
+        # Specific geography prefixes
+        r"((?:Nigerian|Ghanaian|Kenyan|South\s+African|Egyptian|Indian|Chinese|"
+        r"Korean|Japanese|Brazilian|Mexican)\s+[A-Z][^\n]{5,60})",
     ]
+
     for pat in patterns:
-        m = re.search(pat, text[:4000], re.IGNORECASE)
+        m = re.search(pat, chunk, re.IGNORECASE)
         if m:
-            journal = m.group(1).strip()
-            # Trim at year or issue number
-            journal = re.split(r"\s+\d{4}\b|\s+Vol|\s+\d+\s*\(", journal)[0]
-            return journal.strip()[:100]
+            j = m.group(1).strip()
+            # Trim at year / volume / issue markers
+            j = re.split(r"\s+\d{4}\b|\s+[Vv]ol|\s+\d+\s*[\(,]", j)[0]
+            j = j.strip().rstrip(".,;:")
+            if len(j) >= 8:
+                return j[:100]
+
+    # Check if PDF metadata title field is actually a journal name
+    if meta_title and re.search(
+        r"\b(Journal|Review|Annals|Bulletin|Transactions|Letters)\b",
+        meta_title, re.IGNORECASE,
+    ):
+        return meta_title[:100]
+
     return ""
 
 
-def _extract_keywords_from_text(text: str) -> list[str]:
-    """Extract keywords from labelled 'Keywords:' block."""
+# ── Volume / Issue / Year ─────────────────────────────────────────────────────
+
+def _extract_volume(text: str) -> str:
     m = re.search(
-        r"(?:Keywords?|Key\s+words?|Index\s+terms?)\s*[:—]\s*([^\n]{10,500})",
-        text[:8000], re.IGNORECASE,
+        r"\bVol(?:ume)?\.?\s*(\d+)",
+        text[:4000], re.IGNORECASE,
     )
-    if not m:
-        return []
-    raw  = m.group(1).strip()
-    # Split on semicolons, commas, or bullets
-    kws  = [k.strip().strip("•·-") for k in re.split(r"[;,•·]", raw) if k.strip()]
-    # Filter out empty strings and overly long entries
-    kws  = [k for k in kws if 2 < len(k) < 60]
-    return kws[:15]
+    return m.group(1) if m else ""
 
 
-def _extract_pattern(pattern: str, text: str) -> str:
-    """Generic pattern extraction — returns first non-None group."""
-    m = re.search(pattern, text[:4000], re.IGNORECASE)
+def _extract_issue(text: str) -> str:
+    """Extract issue/number from Vol X(Y) or Issue Y or No. Y patterns."""
+    # Vol X(Y) — issue in parentheses right after volume
+    m = re.search(r"\bVol(?:ume)?\.?\s*\d+\s*[\(,]\s*(\d+)\s*[\),]", text[:4000], re.IGNORECASE)
     if m:
-        return next((g for g in m.groups() if g), "")
+        return m.group(1)
+    m = re.search(r"\b(?:Issue|No\.?|Number)\s*(\d+)", text[:4000], re.IGNORECASE)
+    return m.group(1) if m else ""
+
+
+def _extract_year(text: str, created: str) -> str:
+    """
+    Extract publication year.
+    Tries explicit patterns in text, falls back to PDF creation date.
+    """
+    # Pattern: (2016) or , 2016. or "published 2016" in first 3 pages
+    m = re.search(
+        r"(?:published|accepted|received|online|copyright)\D{0,20}((?:19|20)\d{2})\b",
+        text[:4000], re.IGNORECASE,
+    )
+    if m:
+        return m.group(1)
+
+    # Year in parentheses next to volume/journal info
+    m = re.search(r"\b((?:19|20)\d{2})\b", text[:2000])
+    if m:
+        yr = int(m.group(1))
+        if 1900 <= yr <= 2030:
+            return str(yr)
+
+    # Fall back to creation date from PDF metadata
+    if created:
+        d = re.match(r"D:(\d{4})", created)
+        if d:
+            return d.group(1)
+        d = re.search(r"\b((?:19|20)\d{2})\b", created)
+        if d:
+            return d.group(1)
+
     return ""
+
+
+# ── Keywords ─────────────────────────────────────────────────────────────────
+
+def _extract_keywords(text: str, meta_kw: str = "") -> list[str]:
+    """
+    Extract keywords from:
+      1. 'Keywords:' / 'Key words:' / 'Index terms:' labelled block in text
+      2. PDF metadata keywords field
+    """
+    # Strategy 1: labelled block in text
+    m = re.search(
+        r"(?:Keywords?|Key\s+words?|Index\s+[Tt]erms?|[Kk]ey[Pp]hrases?)"
+        r"\s*[:—]\s*"
+        r"([^\n]{10,600})",
+        text[:10000], re.IGNORECASE,
+    )
+    if m:
+        raw  = m.group(1).strip()
+        kws  = [k.strip().strip("•·-–—") for k in re.split(r"[;,•·]", raw)]
+        kws  = [k for k in kws if 2 < len(k) < 80]
+        if kws:
+            return kws[:15]
+
+    # Strategy 2: PDF metadata keywords
+    if meta_kw:
+        kws = [k.strip() for k in re.split(r"[;,]", meta_kw) if k.strip()]
+        kws = [k for k in kws if 2 < len(k) < 80]
+        return kws[:15]
+
+    return []
 
 
 # ── Sentence splitter ─────────────────────────────────────────────────────────
 
 def _split_sentences(text: str) -> list[str]:
     """
-    Two-pass sentence splitter: protect abbreviations + decimals,
-    then split on sentence-ending punctuation followed by capital.
+    Two-pass splitter:
+      Pass 1 — protect abbreviations and decimal numbers
+      Pass 2 — split on sentence-ending punctuation + capital/bracket
     """
     abbrevs = [
-        r"Mr\.", r"Mrs\.", r"Ms\.", r"Dr\.", r"Prof\.", r"Fig\.", r"Tab\.",
-        r"Eq\.", r"Sec\.", r"Vol\.", r"No\.", r"pp\.", r"vs\.", r"approx\.",
-        r"et al\.", r"i\.e\.", r"e\.g\.", r"cf\.", r"viz\.", r"resp\.",
-        r"ca\.", r"op\. cit\.", r"ibid\.", r"al\.",
+        r"Mr\.", r"Mrs\.", r"Ms\.", r"Dr\.", r"Prof\.", r"Assoc\.",
+        r"Fig\.", r"Figs\.", r"Tab\.", r"Eq\.", r"Eqs\.", r"Sec\.",
+        r"Vol\.", r"No\.", r"pp\.", r"vs\.", r"approx\.", r"resp\.",
+        r"et al\.", r"i\.e\.", r"e\.g\.", r"cf\.", r"viz\.", r"ca\.",
+        r"op\.\s*cit\.", r"ibid\.", r"al\.", r"Ref\.", r"refs\.",
+        r"Jan\.", r"Feb\.", r"Mar\.", r"Apr\.", r"Jun\.", r"Jul\.",
+        r"Aug\.", r"Sep\.", r"Oct\.", r"Nov\.", r"Dec\.",
+        r"U\.S\.", r"U\.K\.", r"U\.N\.",
     ]
     protected = text
     ph: dict[str, str] = {}
@@ -918,13 +1171,17 @@ def _split_sentences(text: str) -> list[str]:
         protected = re.sub(pat, lambda m, pl=p: m.group().replace(".", pl), protected)
         ph[p] = "."
 
+    # Protect decimal numbers: 3.14, 2.1, 99.9
     protected = re.sub(r"(\d)\.(\d)", r"\1__D__\2", protected)
+    # Protect single-letter initials: "J. Smith"
+    protected = re.sub(r"\b([A-Z])\.\s+([A-Z])", r"\1__I__\2", protected)
 
-    parts = re.split(r"(?<=[.!?])\s+(?=[A-Z\[\(\"'])", protected)
+    # Split on sentence-ending punctuation followed by whitespace + capital/bracket/quote
+    parts = re.split(r"(?<=[.!?])\s+(?=[A-Z\[\(\"'\u2018\u201c])", protected)
 
     result: list[str] = []
     for part in parts:
-        part = part.replace("__D__", ".")
+        part = part.replace("__D__", ".").replace("__I__", ". ")
         for p in ph:
             part = part.replace(p, ".")
         part = part.strip()

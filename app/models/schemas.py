@@ -16,7 +16,7 @@ from enum import Enum
 from datetime import datetime
 from typing import Optional, Any
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 # ── Enums ─────────────────────────────────────────────────────────────────────
@@ -175,7 +175,7 @@ class ProcessedDocument(BaseModel):
 
 class SearchResult(BaseModel):
     chunk : TextChunk
-    score : float = Field(..., ge=0.0, le=1.0, description="Cosine similarity 0–1")
+    score : float = Field(..., ge=0.0, description="Cosine similarity score")
     rank  : int   = Field(default=0, ge=0)
 
 

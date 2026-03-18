@@ -1024,13 +1024,42 @@ def _render_info_tab(info: dict) -> None:
     )
     c1, c2 = st.columns(2)
     with c1:
-        _meta_block("Title",    meta.get("title") or "—")
-        _meta_block("Authors",  ", ".join(meta.get("authors", [])) or "—")
-        _meta_block("Language", meta.get("language", "en").upper())
+        _meta_block("Title",     meta.get("title")   or "—")
+        _meta_block("Authors",   ", ".join(meta.get("authors", [])) or "—")
+        _meta_block("Journal",   meta.get("journal") or "—")
+        _meta_block("Publisher", meta.get("publisher") or "—")
+        _meta_block("Language",  meta.get("language", "en").upper())
     with c2:
         _meta_block("Pages",     str(meta.get("pages", 0)),  large=True)
         _meta_block("Words",     _fmt(meta.get("words", 0)), large=True)
+        _meta_block("DOI",       meta.get("doi")    or "—")
+        _meta_block("ISSN",      meta.get("issn")   or "—")
+        vol   = meta.get("volume", "")
+        issue = meta.get("issue",  "")
+        vol_issue = (
+            (f"Vol {vol}" if vol else "") +
+            (f", No {issue}" if issue else "")
+        ) or "—"
+        _meta_block("Vol / Issue", vol_issue)
         _meta_block("File Size", meta.get("file_size", "—"))
+
+    # Keywords
+    kws = meta.get("keywords", [])
+    if kws:
+        st.markdown(
+            '<div style="font-family:\'Lora\',serif;font-size:1rem;'
+            'font-weight:600;margin:1rem 0 0.5rem;">Keywords</div>',
+            unsafe_allow_html=True,
+        )
+        kw_html = " ".join(
+            f'<span style="display:inline-block;background:var(--surface);'
+            f'border:1px solid var(--border);border-radius:20px;'
+            f'padding:0.18rem 0.65rem;font-family:\'JetBrains Mono\',monospace;'
+            f'font-size:0.68rem;margin:0.2rem 0.2rem 0 0;color:var(--ink);">'
+            f'{html.escape(k)}</span>'
+            for k in kws
+        )
+        st.markdown(kw_html, unsafe_allow_html=True)
 
     st.markdown(
         '<div style="font-family:\'Lora\',serif;font-size:1.1rem;'
