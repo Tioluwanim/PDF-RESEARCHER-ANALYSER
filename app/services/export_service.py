@@ -311,7 +311,7 @@ class ExportService:
                 kws = m.keywords or []
                 if not kws:
                     kws = _extract_keywords_list(doc.full_text or "")
-                keywords = "; ".join(_clean(k) for k in kws if k.strip())
+                keywords = " || ".join(_clean(k) for k in kws if k.strip())
 
                 # ── Citation ──────────────────────────────────────────────────
                 citation = _build_citation(
