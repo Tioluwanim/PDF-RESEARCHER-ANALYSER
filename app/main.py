@@ -517,6 +517,16 @@ def _render_sidebar() -> None:
 
         _sidebar_divider()
 
+        # Re-process active document
+        if st.session_state.active_doc_id:
+            _sidebar_label("Actions")
+            if st.button("🔄 Re-process Active Doc", key="reprocess_btn"):
+                _delete_doc_cache(st.session_state.active_doc_id)
+                st.session_state.chat_history = []
+                st.rerun()
+
+        _sidebar_divider()
+
         # LLM provider status
         _sidebar_label("LLM Providers")
         try:
@@ -560,6 +570,20 @@ def _sidebar_divider() -> None:
     st.markdown("<hr style='border-color:#1f1d18;margin:1rem 0;'>", unsafe_allow_html=True)
 
 
+# ── Cache helpers ─────────────────────────────────────────────────────────────
+def _delete_doc_cache(doc_id: str) -> None:
+    """Delete processed JSON + vector index so doc is re-extracted fresh."""
+    import shutil
+    from pathlib import Path
+    from app.config import PROCESSED_DIR, VECTORSTORE_DIR
+    json_file = Path(PROCESSED_DIR) / f"{doc_id}.json"
+    if json_file.exists():
+        json_file.unlink()
+    vec_dir = Path(VECTORSTORE_DIR) / doc_id
+    if vec_dir.exists():
+        shutil.rmtree(vec_dir, ignore_errors=True)
+
+
 # ── Upload / Process ──────────────────────────────────────────────────────────
 def _handle_upload(f) -> None:
     with st.spinner("Uploading …"):
@@ -585,7 +609,7 @@ def _process_document(doc_id: str) -> None:
             unsafe_allow_html=True,
         )
 
-    result = analysis_service.process_document(doc_id=doc_id, on_progress=on_progress)
+    result = analysis_service.process_document(doc_id=doc_id, on_progress=on_progress, reprocess=True)
     bar.empty()
     slot.empty()
 
