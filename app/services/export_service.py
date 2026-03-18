@@ -412,46 +412,40 @@ def _build_citation(
     publisher : str = "",
 ) -> str:
     """
-    Build an APA 7th edition citation.
+    Build a citation in Nigerian journal format:
 
-    Journal article:
-      Adegbola, A. J., Soyinka, J. O., & Adeagbo, B. A. (2016).
-      Alteration of the disposition of quinine in healthy volunteers
-      after concurrent ciprofloxacin administration.
-      *American Journal of Therapeutics*, *23*(2), e398–e404.
-      https://doi.org/10.1097/MJT.0000000000000166
+      Last, F. N. and Last, F. N. (Year). Title of article.
+      Journal Name, Volume(Issue):pages.
 
-    Book / report (no journal):
-      Adegbola, A. J. (2016). *Title of work*. Publisher.
+    Example:
+      Shabi, I. N. and Adeagbo, O. O. (2015). Dynamics of library use
+      and reading habits among senior secondary school students.
+      Nigerian School Library Journal, 14(1):7-14.
     """
     parts: list[str] = []
 
-    # ── Authors ───────────────────────────────────────────────────────────────
+    # ── Authors — "Last, F. N. and Last, F. N." ───────────────────────────────
     if authors:
-        apa_authors = []
-        for a in authors[:20]:
+        formatted = []
+        for a in authors:
             a = a.strip()
             if not a:
                 continue
             if "," in a:
                 # Already "Last, First M." — use as-is
-                apa_authors.append(a)
+                formatted.append(a)
             else:
                 # "First [Middle] Last" → "Last, F. [M.]"
                 tokens   = a.split()
                 last     = tokens[-1]
                 initials = " ".join(f"{t[0]}." for t in tokens[:-1] if t)
-                apa_authors.append(f"{last}, {initials}" if initials else last)
+                formatted.append(f"{last}, {initials}" if initials else last)
 
-        if len(apa_authors) == 1:
-            author_str = apa_authors[0]
-        elif len(apa_authors) == 2:
-            author_str = f"{apa_authors[0]}, & {apa_authors[1]}"
-        elif len(apa_authors) <= 20:
-            author_str = ", ".join(apa_authors[:-1]) + f", & {apa_authors[-1]}"
+        # Join with "and" between each author (no ampersand, no Oxford comma)
+        if len(formatted) == 1:
+            author_str = formatted[0]
         else:
-            # APA 7: first 19 authors, ellipsis, last author
-            author_str = ", ".join(apa_authors[:19]) + f", ... {apa_authors[-1]}"
+            author_str = " and ".join(formatted)
 
         parts.append(author_str)
 
@@ -462,47 +456,41 @@ def _build_citation(
     else:
         parts.append("(n.d.).")
 
-    # ── Title — APA sentence case ─────────────────────────────────────────────
+    # ── Title — sentence case, preserve acronyms + hyphenated proper nouns ────
     if title:
-        # Sentence case: lower everything then restore first letter + post-colon
-        # BUT preserve acronyms (all-caps tokens like HPLC, UV, DNA, COVID)
         words = title.split()
         cased = []
         for i, word in enumerate(words):
-            # Strip punctuation for check
             core = re.sub(r"[^A-Za-z]", "", word)
             if core and core == core.upper() and len(core) >= 2:
-                # Acronym — keep as-is
-                cased.append(word)
+                cased.append(word)                          # acronym — preserve
+            elif "-" in word and any(p[0].isupper() for p in word.split("-") if p):
+                cased.append(word)                          # hyphenated proper noun e.g. Ile-Ife
             elif i == 0:
-                # First word — capitalise
                 cased.append(word[0].upper() + word[1:].lower())
             else:
                 cased.append(word.lower())
         t = " ".join(cased)
-        # Re-capitalise first word after ": "
+        # Capitalise first word after ":"
         t = re.sub(r"(:\s+)([a-z])", lambda m: m.group(1) + m.group(2).upper(), t)
-        if journal:
-            parts.append(f"{t}.")               # article title — no italics
-        else:
-            parts.append(f"*{t}*.")             # book/report — italics
+        parts.append(f"{t}.")
 
-    # ── Source ────────────────────────────────────────────────────────────────
+    # ── Journal, Volume(Issue):pages ─────────────────────────────────────────
     if journal:
-        src = f"*{journal}*"                    # journal name in italics
+        src = journal
         if volume:
-            src += f", *{volume}*"              # volume in italics
+            src += f", {volume}"
             if issue:
-                src += f"({issue})"             # issue in roman, parentheses
+                src += f"({issue})"
         if pages:
-            src += f", {pages}"
+            src += f":{pages}"
         src += "."
         parts.append(src)
     elif publisher:
         parts.append(f"{publisher}.")
 
-    # ── DOI ───────────────────────────────────────────────────────────────────
-    if doi:
+    # ── DOI — only append if no journal info ──────────────────────────────────
+    if doi and not journal:
         doi_url = doi if doi.startswith("http") else f"https://doi.org/{doi}"
         parts.append(doi_url)
 
