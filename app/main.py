@@ -525,6 +525,15 @@ def _render_sidebar() -> None:
                 st.session_state.chat_history = []
                 st.rerun()
 
+        # Clear all documents
+        if docs:
+            if st.button("🗑 Clear All Documents", key="clear_all_btn"):
+                _delete_all_docs()
+                st.session_state.active_doc_id = None
+                st.session_state.chat_history  = []
+                st.session_state.export_data   = {}
+                st.rerun()
+
         _sidebar_divider()
 
         # LLM provider status
@@ -574,7 +583,6 @@ def _sidebar_divider() -> None:
 def _delete_doc_cache(doc_id: str) -> None:
     """Delete processed JSON + vector index so doc is re-extracted fresh."""
     import shutil
-    from pathlib import Path
     from app.config import PROCESSED_DIR, VECTORSTORE_DIR
     json_file = Path(PROCESSED_DIR) / f"{doc_id}.json"
     if json_file.exists():
@@ -582,6 +590,17 @@ def _delete_doc_cache(doc_id: str) -> None:
     vec_dir = Path(VECTORSTORE_DIR) / doc_id
     if vec_dir.exists():
         shutil.rmtree(vec_dir, ignore_errors=True)
+
+
+def _delete_all_docs() -> None:
+    """Wipe all processed docs and vector indexes."""
+    import shutil
+    from app.config import PROCESSED_DIR, VECTORSTORE_DIR, UPLOAD_DIR
+    for folder in [PROCESSED_DIR, VECTORSTORE_DIR, UPLOAD_DIR]:
+        p = Path(folder)
+        if p.exists():
+            shutil.rmtree(p, ignore_errors=True)
+        p.mkdir(parents=True, exist_ok=True)
 
 
 # ── Upload / Process ──────────────────────────────────────────────────────────
