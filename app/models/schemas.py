@@ -94,8 +94,7 @@ class TextChunk(BaseModel):
 class DocumentMetadata(BaseModel):
     """
     All extractable metadata from a PDF.
-    Fields beyond title/authors/pages are populated by extraction_service
-    and consumed directly by export_service — no re-extraction needed.
+    Fields populated by extraction_service and consumed by export_service.
     """
     title           : str       = Field(default="")
     authors         : list[str] = Field(default_factory=list)
@@ -105,10 +104,28 @@ class DocumentMetadata(BaseModel):
     # Bibliographic
     doi             : str       = Field(default="")
     issn            : str       = Field(default="")
+    isbn            : str       = Field(default="")
     publisher       : str       = Field(default="")
     journal         : str       = Field(default="")
     volume          : str       = Field(default="")
     issue           : str       = Field(default="")
+    pages           : str       = Field(default="")   # e.g. "e398-e404" or "7-14"
+    article_type    : str       = Field(default="")   # e.g. "Original Research", "Review"
+    editor          : str       = Field(default="")   # journal/book editor
+
+    # Dates
+    year            : str       = Field(default="")   # publication year
+    received_date   : str       = Field(default="")
+    accepted_date   : str       = Field(default="")
+    published_date  : str       = Field(default="")
+
+    # Authors & affiliation
+    affiliations    : list[str] = Field(default_factory=list)
+    corresponding_email: str   = Field(default="")
+    orcids          : list[str] = Field(default_factory=list)
+
+    # Funding
+    funding         : str       = Field(default="")
 
     # Document stats
     page_count      : int       = Field(default=0, ge=0)

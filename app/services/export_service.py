@@ -27,11 +27,24 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# ── Column order — "name original" first, then metadata ─────────────────────
+# ── Exact column order matching For_Metadata.xlsx (+ name original first) ────
 XLSX_COLUMNS = [
-    "name original", "title", "authors", "editor", "date", "page no",
-    "abstract", "sponsor", "citation", "doi", "issn",
-    "publisher", "journal", "keywords", "type", "issue", "volume",
+    "name original",  # PDF filename — added so you know which file each row came from
+    "authors",        # separated by ||
+    "editor",         # journal editor
+    "date",           # publication year
+    "page no",        # page range e.g. 7-14 or e398-e404
+    "abstract",       # full abstract
+    "sponsor",        # funding / sponsor statement
+    "citation",       # formatted citation
+    "doi",            # DOI
+    "issn",           # ISSN
+    "publisher",      # publisher name
+    "keywords",       # separated by ||
+    "title",          # paper title
+    "type",           # article type
+    "issue",          # journal issue
+    "volume",         # journal volume
 ]
 
 
@@ -90,8 +103,11 @@ class ExportService:
 
         # ── Column widths ─────────────────────────────────────────────────────
         col_widths = {
-            "name original": 30, "title": 45, "authors": 36, "abstract": 65,
-            "journal": 35, "keywords": 32, "doi": 32, "citation": 42, "publisher": 25,
+            "name original": 28, "authors": 36, "editor": 22,
+            "date": 12, "page no": 12, "abstract": 60,
+            "sponsor": 30, "citation": 45, "doi": 32,
+            "issn": 14, "publisher": 24, "keywords": 32,
+            "title": 45, "type": 20, "issue": 10, "volume": 10,
         }
         for col_i, col_name in enumerate(XLSX_COLUMNS, start=1):
             ws.column_dimensions[get_column_letter(col_i)].width = col_widths.get(col_name, 16)
@@ -178,15 +194,18 @@ class ExportService:
 
             meta_fields = [
                 ("Authors",      row.get("authors",   "") or "—"),
-                ("Journal",      row.get("journal",   "") or "—"),
-                ("Vol / Issue",  vol_issue),
+                ("Editor",       row.get("editor",    "") or "—"),
+                ("Journal",      row.get("_journal",  "") or "—"),
+                ("Vol / Issue",  (f"Vol {row.get('volume','')}" if row.get('volume') else "") +
+                                 (f", No {row.get('issue','')}" if row.get('issue') else "") or "—"),
                 ("Date",         row.get("date",      "") or "—"),
+                ("Pages",        row.get("page no",   "") or "—"),
                 ("Publisher",    row.get("publisher", "") or "—"),
                 ("DOI",          row.get("doi",       "") or "—"),
                 ("ISSN",         row.get("issn",      "") or "—"),
-                ("Pages",        row.get("page no",   "") or "—"),
                 ("Keywords",     row.get("keywords",  "") or "—"),
                 ("Type",         row.get("type",      "") or "—"),
+                ("Sponsor",      row.get("sponsor",   "") or "—"),
             ]
             table = doc.add_table(rows=len(meta_fields), cols=2)
             table.style = "Table Grid"
@@ -249,12 +268,13 @@ class ExportService:
 
     def _collect_rows(self, doc_ids: list[str]) -> list[dict]:
         """
-        Load metadata for each unique doc_id and map to export columns.
+        Load metadata for each unique doc_id and map to the exact
+        For_Metadata.xlsx column template.
 
-        Priority for each field:
-          1. Schema field (populated by new extraction_service)
-          2. Section content (e.g. abstract from detected section)
-          3. Regex fallback from full_text (for older documents)
+        Field priority for each column:
+          1. Schema field set by extraction_service (most reliable)
+          2. Detected section content (e.g. abstract)
+          3. Regex fallback from full_text (for older/re-processed docs)
         """
         seen: set[str] = set()
         rows: list[dict] = []
@@ -271,24 +291,35 @@ class ExportService:
 
                 m      = doc.metadata
                 first3 = "\n".join((doc.full_text or "").split("\n\n")[:60])
+                full   = doc.full_text or ""
 
-                # ── Title ─────────────────────────────────────────────────────
+                # ── title ─────────────────────────────────────────────────────
                 title = _clean(m.title or "")
                 if not title:
                     title = _clean(doc.filename.replace(".pdf", ""))
 
-                # ── Authors — separated by || ──────────────────────────────────
+                # ── authors — separated by || ─────────────────────────────────
                 authors_list = [_clean(a) for a in (m.authors or []) if a.strip()]
                 if not authors_list:
-                    authors_list = _fallback_authors(doc.full_text or "", title)
+                    authors_list = _fallback_authors(full, title)
                 authors = " || ".join(authors_list)
 
-                # ── Date ──────────────────────────────────────────────────────
-                # created_at is now a year string ("2016") from new extraction_service
-                # OR a raw PDF date ("D:20160823...") from older docs
-                date = _parse_date(m.created_at or "")
+                # ── editor ────────────────────────────────────────────────────
+                editor = _clean(getattr(m, "editor", "") or "")
+                if not editor:
+                    editor = _extract_editor_fb(first3)
 
-                # ── Abstract — section content takes priority ──────────────────
+                # ── date — prefer publication year ────────────────────────────
+                year = _clean(getattr(m, "year", "") or "")
+                date = year or _parse_date(m.created_at or "")
+
+                # ── page no — page range takes priority over page count ────────
+                pages    = _clean(getattr(m, "pages", "") or "")
+                if not pages:
+                    pages = _extract_pages_fb(first3)
+                page_no  = pages or (str(m.page_count) if m.page_count else "")
+
+                # ── abstract ──────────────────────────────────────────────────
                 abstract = ""
                 for sec in (doc.sections or []):
                     if sec.section_type.value == "abstract":
@@ -296,24 +327,37 @@ class ExportService:
                         break
                 if not abstract:
                     abstract = _clean(m.abstract or "")[:2000]
+                if not abstract:
+                    abstract = _extract_abstract_fb(full[:5000])
 
-                # ── Bibliographic — schema first, regex fallback ───────────────
-                doi       = m.doi       or _extract_doi(first3)
-                issn      = m.issn      or _extract_issn(first3)
-                publisher = m.publisher or _extract_publisher(first3)
-                journal   = m.journal   or _extract_journal(first3)
-                volume    = m.volume    or _extract_pattern(r"\bVol(?:ume)?\.?\s*(\d+)", first3)
-                issue     = m.issue     or _extract_pattern(
-                    r"\bIssue\.?\s*(\d+)|\bNo\.?\s*(\d+)|\(\s*(\d+)\s*\)", first3
-                )
+                # ── sponsor (funding) ─────────────────────────────────────────
+                sponsor = _clean(getattr(m, "funding", "") or "")
+                if not sponsor:
+                    sponsor = _extract_funding_fb(full[:8000])
 
-                # ── Keywords ─────────────────────────────────────────────────
-                kws = m.keywords or []
+                # ── bibliographic — schema first, regex fallback ───────────────
+                doi       = _clean(m.doi       or "") or _extract_doi(first3)
+                issn      = _clean(m.issn      or "") or _extract_issn(first3)
+                publisher = _clean(m.publisher or "") or _extract_publisher(first3)
+                journal   = _clean(m.journal   or "") or _extract_journal(first3)
+                volume    = _clean(m.volume    or "") or _extract_pattern(
+                    r"\bVol(?:ume)?\.?\s*(\d+)", first3)
+                issue     = _clean(m.issue     or "") or _extract_pattern(
+                    r"\bVol(?:ume)?\.?\s*\d+[\s,\(]*(\d+)[\s,\)]|"
+                    r"\bIssue\.?\s*(\d+)|\bNo\.?\s*(\d+)", first3)
+
+                # ── keywords — separated by || ────────────────────────────────
+                kws = list(m.keywords or [])
                 if not kws:
-                    kws = _extract_keywords_list(doc.full_text or "")
+                    kws = _extract_keywords_list(full)
                 keywords = " || ".join(_clean(k) for k in kws if k.strip())
 
-                # ── Citation ──────────────────────────────────────────────────
+                # ── type ──────────────────────────────────────────────────────
+                article_type = _clean(getattr(m, "article_type", "") or "")
+                if not article_type:
+                    article_type = _extract_article_type_fb(first3)
+
+                # ── citation ──────────────────────────────────────────────────
                 citation = _build_citation(
                     title     = title,
                     authors   = authors_list,
@@ -321,32 +365,32 @@ class ExportService:
                     journal   = journal,
                     volume    = volume,
                     issue     = issue,
-                    pages     = str(m.page_count) if m.page_count else "",
+                    pages     = pages,
                     doi       = doi,
                     publisher = publisher,
                 )
 
                 rows.append({
-                    "name original": doc.filename,   # original PDF filename
-                    "title"    : title,
-                    "authors"  : authors,
-                    "editor"   : "",
-                    "date"     : date,
-                    "page no"  : str(m.page_count) if m.page_count else "",
-                    "abstract" : abstract,
-                    "sponsor"  : "",
-                    "citation" : citation,
-                    "doi"      : doi,
-                    "issn"     : issn,
-                    "publisher": publisher,
-                    "journal"  : journal,
-                    "keywords" : keywords,
-                    "type"     : "Research Paper",
-                    "issue"    : issue,
-                    "volume"   : volume,
-                    # Internal — stripped from JSON, not in XLSX
-                    "_filename": doc.filename,
-                    "_doc_id"  : doc.doc_id,
+                    "name original" : doc.filename,
+                    "authors"       : authors,
+                    "editor"        : editor,
+                    "date"          : date,
+                    "page no"       : page_no,
+                    "abstract"      : abstract,
+                    "sponsor"       : sponsor,
+                    "citation"      : citation,
+                    "doi"           : doi,
+                    "issn"          : issn,
+                    "publisher"     : publisher,
+                    "keywords"      : keywords,
+                    "title"         : title,
+                    "type"          : article_type or "Research Article",
+                    "issue"         : issue,
+                    "volume"        : volume,
+                    # Internal — not in XLSX/CSV
+                    "_filename"     : doc.filename,
+                    "_doc_id"       : doc.doc_id,
+                    "_journal"      : journal,  # used for citation
                 })
 
             except Exception as e:
@@ -495,6 +539,81 @@ def _build_citation(
         parts.append(doi_url)
 
     return " ".join(parts)
+
+
+def _extract_editor_fb(text: str) -> str:
+    m = re.search(
+        r"(?:Edited\s+by|Guest\s+Editor|Editor[-\s]?in[-\s]?Chief|"
+        r"Handling\s+Editor)[:\s]+([A-Z][^\n]{3,80})",
+        text[:4000], re.IGNORECASE,
+    )
+    if m:
+        raw = m.group(1).strip().rstrip(".,;")
+        raw = re.split(r"\s*[,;]\s*(?:PhD|MD|Dr|Prof|University|Institute)", raw, flags=re.IGNORECASE)[0]
+        return raw.strip()[:80]
+    return ""
+
+
+def _extract_pages_fb(text: str) -> str:
+    m = re.search(r"\bpp?\.?\s*([eE]?\d{1,5}\s*[-–]\s*[eE]?\d{1,5})\b", text[:3000], re.IGNORECASE)
+    if m:
+        return m.group(1).replace(" ", "")
+    m = re.search(r"\bVol[^\n]{1,30},\s*([eE]?\d{1,5}[-–][eE]?\d{1,5})\b", text[:3000], re.IGNORECASE)
+    if m:
+        return m.group(1)
+    m = re.search(r"\b\d+:\s*([eE]?\d{1,5}[-–][eE]?\d{1,5})\b", text[:3000])
+    if m:
+        return m.group(1)
+    return ""
+
+
+def _extract_abstract_fb(text: str) -> str:
+    m = re.search(
+        r"\b(?:Abstract|Summary)\b\s*[:—]?\s*\n?([\s\S]{80,2000}?)"
+        r"(?=\n\s*\n\s*(?:Keywords?|Introduction|Background|1\.|$))",
+        text, re.IGNORECASE,
+    )
+    if m:
+        return _clean(m.group(1))[:2000]
+    paras = [p.strip() for p in re.split(r"\n\s*\n", text) if len(p.strip()) > 120]
+    for para in paras[1:5]:
+        if len(para) > 120:
+            return _clean(para[:2000])
+    return ""
+
+
+def _extract_funding_fb(text: str) -> str:
+    patterns = [
+        r"(?:Funding|Funding\s+source|Financial\s+support|Grant)[:\s]+([^\n]{10,300})",
+        r"(?:supported\s+by|funded\s+by|sponsored\s+by)\s+([^\n]{10,200})",
+        r"(?:This\s+(?:study|work|research)\s+was\s+(?:supported|funded)\s+by)\s+([^\n]{10,200})",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()[:300]
+    return ""
+
+
+def _extract_article_type_fb(text: str) -> str:
+    patterns = [
+        r"\b(Systematic\s+Review(?:\s+and\s+Meta[-\s]?Analysis)?)\b",
+        r"\b(Meta[-\s]?Analysis)\b",
+        r"\b(Randomized\s+Controlled\s+Trial|RCT)\b",
+        r"\b(Clinical\s+Trial)\b",
+        r"\b(Case\s+Report)\b",
+        r"\b(Review\s+Article|Literature\s+Review|Review\s+Paper)\b",
+        r"\b(Original\s+(?:Research|Article|Paper))\b",
+        r"\b(Research\s+Article|Research\s+Paper)\b",
+        r"\b(Short\s+(?:Communication|Report|Note))\b",
+        r"\b(Letter\s+to\s+the\s+Editor)\b",
+        r"\b(Technical\s+(?:Note|Report))\b",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text[:3000], re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+    return "Research Article"
 
 
 def _fallback_authors(text: str, title: str) -> list[str]:

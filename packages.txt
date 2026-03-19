@@ -1,1 +1,5 @@
 libmupdf-dev
+tesseract-ocr
+tesseract-ocr-eng
+poppler-utils
+libpoppler-cpp-dev

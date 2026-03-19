@@ -766,8 +766,10 @@ def _render_doc_header(info: dict) -> None:
             unsafe_allow_html=True,
         )
     with c4:
+        is_ocr = meta.get("language") == "ocr"
+        label  = "Chunks · OCR" if is_ocr else "Chunks"
         st.markdown(
-            f'<div class="stat-card"><div class="stat-label">Chunks</div>'
+            f'<div class="stat-card"><div class="stat-label">{label}</div>'
             f'<div class="stat-value">{chunks.get("total", 0)}</div></div>',
             unsafe_allow_html=True,
         )
@@ -1028,7 +1030,9 @@ def _render_info_tab(info: dict) -> None:
         _meta_block("Authors",   ", ".join(meta.get("authors", [])) or "—")
         _meta_block("Journal",   meta.get("journal") or "—")
         _meta_block("Publisher", meta.get("publisher") or "—")
-        _meta_block("Language",  meta.get("language", "en").upper())
+        lang = meta.get("language", "en")
+        lang_display = "🔍 OCR Processed" if lang == "ocr" else lang.upper()
+        _meta_block("Language / Mode", lang_display)
     with c2:
         _meta_block("Pages",     str(meta.get("pages", 0)),  large=True)
         _meta_block("Words",     _fmt(meta.get("words", 0)), large=True)
