@@ -1,6 +1,21 @@
 """
 main.py - PDF Research Analyzer
 Production UI: single PDF, batch (1-50), export (XLSX/DOCX/CSV/JSON).
+
+Fixes over v1:
+  - Chat streaming no longer double-renders history (history loop vs inline render)
+  - text_input + button coordination: question stored in session_state key,
+    cleared explicitly after send so next rerun gets an empty field
+  - Batch uploader bytes read once via getvalue() stored in list before processing
+  - Export cache keyed by frozenset of selected_ids; stale exports auto-invalidated
+    when selection changes
+  - _md_to_html: code blocks extracted BEFORE html.escape to avoid double-encoding
+  - Doc header reads page_count not pages (pages = page range string)
+  - Info tab reads file_size_bytes correctly
+  - Suggested questions use st.session_state to queue the question for next render
+    instead of calling _handle_chat inline (which races with rerun)
+  - Export generate buttons set a generating flag to prevent double-clicks
+  - Typography and colour system tightened
 """
 
 from __future__ import annotations
@@ -54,6 +69,7 @@ st.markdown("""
     --ink:       #0d0c0b;
     --paper:     #f8f5f0;
     --accent:    #bf3a14;
+    --accent-dim:#a02f0e;
     --muted:     #857f76;
     --border:    #ddd8cf;
     --surface:   #eee9e0;
@@ -61,7 +77,9 @@ st.markdown("""
     --success:   #2a6045;
     --warn:      #c47a1e;
     --sidebar:   #111009;
+    --sidebar-2: #1a1814;
     --sidebar-3: #272420;
+    --error:     #cc0000;
 }
 
 html, body, [class*="css"] {
@@ -69,24 +87,25 @@ html, body, [class*="css"] {
     background: var(--paper);
     color: var(--ink);
 }
-.app-title, .doc-title, .meta-value-lg, .stat-value {
+.app-title, .doc-title, .meta-value-lg, .stat-value,
+.section-heading, .tab-heading {
     font-family: 'Lora', Georgia, 'Times New Roman', serif;
 }
 .app-subtitle, .stat-label, .meta-label, .result-section-tag,
-.result-score, [class*="Mono"] {
+.result-score, .mono {
     font-family: 'JetBrains Mono', 'Courier New', monospace;
 }
 
 /* Chrome removal */
 #MainMenu { visibility: hidden; }
 footer    { visibility: hidden; }
-header[data-testid="stHeader"] { background: transparent !important; }
-.stDeployButton              { display: none !important; }
-[data-testid="stToolbar"]    { display: none !important; }
-[data-testid="stDecoration"] { display: none !important; }
-[data-testid="stStatusWidget"]{ display: none !important; }
+header[data-testid="stHeader"]  { background: transparent !important; }
+.stDeployButton                 { display: none !important; }
+[data-testid="stToolbar"]       { display: none !important; }
+[data-testid="stDecoration"]    { display: none !important; }
+[data-testid="stStatusWidget"]  { display: none !important; }
 
-/* Sidebar toggle — always visible */
+/* Sidebar toggle */
 [data-testid="collapsedControl"] {
     visibility: visible !important;
     display:    flex    !important;
@@ -129,9 +148,8 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
     color: white !important;
 }
 
-/* Typography */
+/* App header */
 .app-title {
-    font-family: 'Lora', serif;
     font-size: 2.4rem;
     font-weight: 600;
     letter-spacing: -0.025em;
@@ -140,7 +158,6 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
     margin-bottom: 0.1rem;
 }
 .app-subtitle {
-    font-family: 'JetBrains Mono', monospace;
     font-size: 0.72rem;
     color: var(--muted);
     letter-spacing: 0.1em;
@@ -157,7 +174,6 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
     text-align: center;
 }
 .stat-label {
-    font-family: 'JetBrains Mono', monospace;
     font-size: 0.62rem;
     color: var(--muted);
     text-transform: uppercase;
@@ -165,13 +181,13 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
     margin-bottom: 0.2rem;
 }
 .stat-value {
-    font-family: 'Lora', serif;
     font-size: 1.25rem;
     font-weight: 600;
     color: var(--ink);
 }
+
+/* Doc title */
 .doc-title {
-    font-family: 'Lora', serif;
     font-size: 1.35rem;
     font-weight: 600;
     line-height: 1.3;
@@ -180,28 +196,36 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
 }
 .doc-authors { font-size: 0.8rem; color: var(--muted); font-style: italic; }
 
-/* Chat */
+/* ── Chat ─────────────────────────────────────────────────────────────────── */
+.chat-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0.25rem 0 1rem;
+}
 .msg-user {
     background: var(--ink);
     color: #ece8e0;
     padding: 0.9rem 1.15rem;
     border-radius: 18px 18px 4px 18px;
-    margin: 0.6rem 0 0.6rem 4rem;
+    margin-left: 4rem;
     font-size: 0.9rem;
     line-height: 1.65;
+    animation: fadeIn 0.2s ease;
 }
 .msg-assistant {
     background: var(--surface);
     color: var(--ink);
     padding: 0.9rem 1.15rem 0.9rem 1.25rem;
     border-radius: 4px 18px 18px 18px;
-    margin: 0.6rem 4rem 0.6rem 0;
+    margin-right: 4rem;
     font-size: 0.9rem;
     line-height: 1.75;
     border-left: 3px solid var(--accent);
+    animation: fadeIn 0.2s ease;
 }
-.msg-assistant p  { margin: 0 0 0.6rem; }
-.msg-assistant p:last-child { margin-bottom: 0; }
+.msg-assistant p                { margin: 0 0 0.6rem; }
+.msg-assistant p:last-child     { margin-bottom: 0; }
 .msg-assistant code {
     background: var(--surface-2);
     padding: 0.1em 0.35em;
@@ -209,19 +233,32 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
     font-family: 'JetBrains Mono', monospace;
     font-size: 0.82em;
 }
-.msg-assistant strong { font-weight: 600; }
-.msg-assistant ul, .msg-assistant ol { margin: 0.4rem 0 0.6rem 1.2rem; padding: 0; }
-.msg-assistant li { margin-bottom: 0.3rem; }
+.msg-assistant strong           { font-weight: 600; }
+.msg-assistant ul,
+.msg-assistant ol               { margin: 0.4rem 0 0.6rem 1.2rem; padding: 0; }
+.msg-assistant li               { margin-bottom: 0.3rem; }
+.msg-assistant pre {
+    background: var(--surface-2);
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8rem;
+    overflow-x: auto;
+    margin: 0.5rem 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
 
 /* Typing indicator */
 .typing-indicator {
-    display: flex; gap: 4px; align-items: center;
+    display: inline-flex;
+    gap: 4px;
+    align-items: center;
     padding: 0.9rem 1.15rem 0.9rem 1.25rem;
     background: var(--surface);
     border-radius: 4px 18px 18px 18px;
-    margin: 0.6rem 4rem 0.6rem 0;
+    margin-right: 4rem;
     border-left: 3px solid var(--accent);
-    width: fit-content;
 }
 .typing-dot {
     width: 7px; height: 7px;
@@ -232,7 +269,43 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
 .typing-dot:nth-child(2) { animation-delay: 0.2s; }
 .typing-dot:nth-child(3) { animation-delay: 0.4s; }
 
-/* Section viewer */
+/* Empty state */
+.empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 5rem 2rem;
+    text-align: center;
+    animation: fadeIn 0.4s ease;
+}
+.empty-icon { font-size: 3.5rem; margin-bottom: 1.25rem; }
+.empty-title {
+    font-family: 'Lora', serif;
+    font-size: 1.6rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    margin-bottom: 0.6rem;
+}
+.empty-sub {
+    font-size: 0.88rem;
+    color: #857f76;
+    max-width: 420px;
+    line-height: 1.7;
+    margin-bottom: 2rem;
+}
+.empty-card {
+    background: #eee9e0;
+    border-radius: 10px;
+    padding: 0.75rem 1.25rem;
+    font-size: 0.8rem;
+    color: #504b43;
+    min-width: 130px;
+    text-align: center;
+}
+.empty-cards { display: flex; gap: 1.5rem; flex-wrap: wrap; justify-content: center; }
+
+/* Section block */
 .section-block {
     background: var(--surface);
     border-radius: 10px;
@@ -241,9 +314,10 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
     font-size: 0.88rem;
     line-height: 1.8;
     white-space: pre-wrap;
+    word-break: break-word;
 }
 
-/* Search cards */
+/* Search result cards */
 .result-card {
     background: var(--paper);
     border: 1px solid var(--border);
@@ -257,14 +331,12 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
     box-shadow: 0 2px 12px rgba(191,58,20,0.08);
 }
 .result-section-tag {
-    font-family: 'JetBrains Mono', monospace;
     font-size: 0.64rem;
     color: var(--accent);
     text-transform: uppercase;
     letter-spacing: 0.08em;
 }
 .result-score {
-    font-family: 'JetBrains Mono', monospace;
     font-size: 0.68rem;
     color: var(--success);
     background: #d4edda;
@@ -287,7 +359,6 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
     margin-bottom: 0.65rem;
 }
 .meta-label {
-    font-family: 'JetBrains Mono', monospace;
     font-size: 0.62rem;
     color: var(--muted);
     text-transform: uppercase;
@@ -295,7 +366,7 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
     margin-bottom: 0.2rem;
 }
 .meta-value     { font-size: 0.9rem; font-weight: 500; color: var(--ink); }
-.meta-value-lg  { font-family: 'Lora', serif; font-size: 1.2rem; font-weight: 600; color: var(--ink); }
+.meta-value-lg  { font-size: 1.2rem; font-weight: 600; color: var(--ink); }
 
 /* Section list */
 .section-row {
@@ -310,7 +381,9 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
 
 /* Batch result row */
 .batch-row {
-    display: flex; gap: 1rem; align-items: center;
+    display: flex;
+    gap: 1rem;
+    align-items: center;
     padding: 0.45rem 0.75rem;
     border-bottom: 1px solid var(--border);
     font-size: 0.82rem;
@@ -358,26 +431,40 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
     font-weight: 600;
 }
 .stButton > button[kind="primary"]:hover {
-    background: #a02f0e !important;
+    background: var(--accent-dim) !important;
     transform: translateY(-1px);
     box-shadow: 0 4px 14px rgba(191,58,20,0.35) !important;
 }
 
-/* Misc */
+/* Progress + misc */
 .stProgress > div > div { background: var(--accent) !important; }
 hr { border-color: var(--border); margin: 1.25rem 0; }
 ::-webkit-scrollbar       { width: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-.stSelectbox > div > div  {
+.stSelectbox > div > div {
     border: 1.5px solid var(--border) !important;
     border-radius: 8px !important;
     background: var(--paper) !important;
 }
 .stMultiSelect > div { border-radius: 8px !important; }
 
+/* Keyword pill */
+.kw-pill {
+    display: inline-block;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 0.18rem 0.65rem;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.68rem;
+    margin: 0.2rem 0.2rem 0 0;
+    color: var(--ink);
+}
+
+/* Animations */
 @keyframes typingBounce {
-    0%, 60%, 100% { transform: translateY(0);   opacity: 0.4; }
+    0%, 60%, 100% { transform: translateY(0);    opacity: 0.4; }
     30%            { transform: translateY(-5px); opacity: 1;   }
 }
 @keyframes fadeIn {
@@ -388,25 +475,35 @@ hr { border-color: var(--border); margin: 1.25rem 0; }
 """, unsafe_allow_html=True)
 
 
-# ── Session state ─────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Session state
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def _init_session() -> None:
-    defaults = {
-        "active_doc_id"     : None,
-        "chat_history"      : [],
-        "startup_done"      : False,
-        "last_uploaded_name": None,
-        "app_mode"          : "📄 Single PDF",
-        # Export: store generated bytes so rerun doesn't lose them
-        "export_data"       : {},   # format → (bytes, filename)
-        # Batch: store last results so rerun doesn't re-run batch
-        "batch_done"        : False,
+    defaults: dict = {
+        "active_doc_id"      : None,
+        "chat_history"       : [],
+        "startup_done"       : False,
+        "last_uploaded_name" : None,
+        "app_mode"           : "📄 Single PDF",
+        # Export: keyed by frozenset of selected_ids → (bytes, filename)
+        # An extra "_selection" key lets us detect when selection changes.
+        "export_data"        : {},
+        "export_selection"   : frozenset(),
+        # Queued chat message — set by suggestion buttons, consumed by chat render
+        "pending_question"   : None,
+        # Generating flags to prevent double-click
+        "generating"         : {},
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
 
-# ── Startup ───────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Startup
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def _run_startup() -> None:
     if not st.session_state.startup_done:
         warnings = validate_config()
@@ -416,7 +513,10 @@ def _run_startup() -> None:
             st.warning(w, icon="⚠️")
 
 
-# ── Utilities ─────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Utilities
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def _fmt(n: int | float) -> str:
     try:
         return f"{int(n):,}"
@@ -425,36 +525,60 @@ def _fmt(n: int | float) -> str:
 
 
 def _md_to_html(text: str) -> str:
-    """Lightweight Markdown → safe HTML for chat bubbles."""
-    t = html.escape(text)
-    # Fenced code blocks
-    t = re.sub(
-        r"```(?:\w+\n)?(.*?)```",
-        lambda m: (
-            '<pre style="background:var(--surface-2);padding:0.75rem 1rem;'
-            'border-radius:6px;font-family:\'JetBrains Mono\',monospace;'
-            f'font-size:0.8rem;overflow-x:auto;margin:0.5rem 0;">'
-            f'{m.group(1).strip()}</pre>'
-        ),
-        t, flags=re.DOTALL,
-    )
-    t = re.sub(r"`([^`]+)`",      r'<code>\1</code>', t)
-    t = re.sub(r"\*\*(.+?)\*\*",  r'<strong>\1</strong>', t)
-    t = re.sub(r"\*(.+?)\*",      r'<em>\1</em>', t)
+    """
+    Lightweight Markdown → safe HTML for chat bubbles.
 
+    Order matters:
+      1. Extract fenced code blocks RAW (before any escaping) and replace
+         with placeholders, so their content isn't double-escaped.
+      2. html.escape the remaining text.
+      3. Restore code block placeholders as <pre> tags with escaped content.
+      4. Apply inline Markdown transforms.
+      5. Wrap in <p> tags.
+    """
+    # Step 1 — pull out fenced code blocks before escaping
+    code_blocks: list[str] = []
+    _FENCE = re.compile(r"```(?:\w+\n)?(.*?)```", re.DOTALL)
+
+    def _stash_block(m: re.Match) -> str:
+        idx = len(code_blocks)
+        code_blocks.append(m.group(1).strip())
+        return f"\x00CODEBLOCK{idx}\x00"
+
+    text = _FENCE.sub(_stash_block, text)
+
+    # Step 2 — escape the rest
+    t = html.escape(text)
+
+    # Step 3 — restore code blocks with escaped content
+    for idx, raw_code in enumerate(code_blocks):
+        escaped_code = html.escape(raw_code)
+        t = t.replace(
+            f"\x00CODEBLOCK{idx}\x00",
+            f'<pre>{escaped_code}</pre>',
+        )
+
+    # Step 4 — inline Markdown (operating on already-escaped text)
+    t = re.sub(r"`([^`]+)`",     r'<code>\1</code>', t)
+    t = re.sub(r"\*\*(.+?)\*\*", r'<strong>\1</strong>', t)
+    t = re.sub(r"\*(.+?)\*",     r'<em>\1</em>', t)
+
+    # Bullet lists
     def _bullets(m: re.Match) -> str:
         items = re.findall(r"^[-•]\s+(.+)$", m.group(0), re.MULTILINE)
         return "<ul>" + "".join(f"<li>{i}</li>" for i in items) + "</ul>"
 
+    # Numbered lists
     def _nums(m: re.Match) -> str:
         items = re.findall(r"^\d+\.\s+(.+)$", m.group(0), re.MULTILINE)
         return "<ol>" + "".join(f"<li>{i}</li>" for i in items) + "</ol>"
 
-    t = re.sub(r"(^[-•]\s+.+$\n?)+", _bullets, t, flags=re.MULTILINE)
+    t = re.sub(r"(^[-•]\s+.+$\n?)+",  _bullets, t, flags=re.MULTILINE)
     t = re.sub(r"(^\d+\.\s+.+$\n?)+", _nums,    t, flags=re.MULTILINE)
 
+    # Step 5 — wrap paragraphs
     paragraphs = [p.strip() for p in re.split(r"\n\n+", t) if p.strip()]
-    result = []
+    result: list[str] = []
     for p in paragraphs:
         if p.startswith(("<ul>", "<ol>", "<pre>")):
             result.append(p)
@@ -463,7 +587,10 @@ def _md_to_html(text: str) -> str:
     return "\n".join(result)
 
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sidebar
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def _render_sidebar() -> None:
     with st.sidebar:
         st.markdown("""
@@ -480,18 +607,17 @@ def _render_sidebar() -> None:
         </div>
         """, unsafe_allow_html=True)
 
-        # Single-PDF upload (only shown in Single PDF mode)
         _sidebar_label("Upload PDF")
         uploaded = st.file_uploader(
             "Drop PDF here", type=["pdf"], label_visibility="collapsed",
         )
         if uploaded and uploaded.name != st.session_state.get("last_uploaded_name"):
             st.session_state.last_uploaded_name = uploaded.name
-            _handle_upload(uploaded)
+            # Read bytes immediately — UploadedFile is not reusable after rerun
+            _handle_upload(uploaded.read(), uploaded.name)
 
         _sidebar_divider()
 
-        # Document list
         _sidebar_label("Documents")
         docs = analysis_service.list_documents()
         if not docs:
@@ -506,37 +632,35 @@ def _render_sidebar() -> None:
                 prefix = "▶ " if active else "   "
                 name   = doc["filename"][:26] + ("…" if len(doc["filename"]) > 26 else "")
                 status_icon = "✓" if doc.get("status") == "ready" else "⏳"
-                if st.button(
-                    f"{prefix}{status_icon} {name}",
-                    key=f"doc_{doc['doc_id']}",
-                ):
+                if st.button(f"{prefix}{status_icon} {name}", key=f"doc_{doc['doc_id']}"):
                     st.session_state.active_doc_id = doc["doc_id"]
                     st.session_state.chat_history  = []
+                    st.session_state.pending_question = None
                     st.session_state.app_mode      = "📄 Single PDF"
                     st.rerun()
 
         _sidebar_divider()
 
-        # Re-process active document
         if st.session_state.active_doc_id:
             _sidebar_label("Actions")
             if st.button("🔄 Re-process Active Doc", key="reprocess_btn"):
                 _delete_doc_cache(st.session_state.active_doc_id)
-                st.session_state.chat_history = []
+                st.session_state.chat_history     = []
+                st.session_state.pending_question = None
                 st.rerun()
 
-        # Clear all documents
         if docs:
             if st.button("🗑 Clear All Documents", key="clear_all_btn"):
                 _delete_all_docs()
-                st.session_state.active_doc_id = None
-                st.session_state.chat_history  = []
-                st.session_state.export_data   = {}
+                st.session_state.active_doc_id    = None
+                st.session_state.chat_history     = []
+                st.session_state.export_data      = {}
+                st.session_state.export_selection = frozenset()
+                st.session_state.pending_question = None
                 st.rerun()
 
         _sidebar_divider()
 
-        # LLM provider status
         _sidebar_label("LLM Providers")
         try:
             providers = analysis_service.get_provider_status()
@@ -561,7 +685,8 @@ def _render_sidebar() -> None:
         st.markdown(
             '<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.62rem;'
             'color:#3a3630;line-height:1.7;">'
-            '<span style="color:#504b43;">Tip:</span> Use Batch to upload 50 PDFs at once</div>',
+            '<span style="color:#504b43;">Tip:</span> '
+            'Use Batch to upload up to 50 PDFs at once</div>',
             unsafe_allow_html=True,
         )
 
@@ -579,9 +704,11 @@ def _sidebar_divider() -> None:
     st.markdown("<hr style='border-color:#1f1d18;margin:1rem 0;'>", unsafe_allow_html=True)
 
 
-# ── Cache helpers ─────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Cache helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def _delete_doc_cache(doc_id: str) -> None:
-    """Delete processed JSON + vector index so doc is re-extracted fresh."""
     import shutil
     from app.config import PROCESSED_DIR, VECTORSTORE_DIR
     json_file = Path(PROCESSED_DIR) / f"{doc_id}.json"
@@ -593,7 +720,6 @@ def _delete_doc_cache(doc_id: str) -> None:
 
 
 def _delete_all_docs() -> None:
-    """Wipe all processed docs and vector indexes."""
     import shutil
     from app.config import PROCESSED_DIR, VECTORSTORE_DIR, UPLOAD_DIR
     for folder in [PROCESSED_DIR, VECTORSTORE_DIR, UPLOAD_DIR]:
@@ -603,14 +729,17 @@ def _delete_all_docs() -> None:
         p.mkdir(parents=True, exist_ok=True)
 
 
-# ── Upload / Process ──────────────────────────────────────────────────────────
-def _handle_upload(f) -> None:
+# ═══════════════════════════════════════════════════════════════════════════════
+# Upload / Process
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _handle_upload(file_bytes: bytes, filename: str) -> None:
     with st.spinner("Uploading …"):
-        doc, err = analysis_service.save_upload(file_bytes=f.read(), filename=f.name)
+        doc, err = analysis_service.save_upload(file_bytes=file_bytes, filename=filename)
     if err or not doc:
         st.error(f"Upload failed: {getattr(err, 'detail', str(err))}")
         return
-    st.success(f"✓ {f.name} uploaded")
+    st.success(f"✓ {filename} uploaded")
     st.session_state.active_doc_id = doc.doc_id
     st.session_state.chat_history  = []
     _process_document(doc.doc_id)
@@ -628,7 +757,9 @@ def _process_document(doc_id: str) -> None:
             unsafe_allow_html=True,
         )
 
-    result = analysis_service.process_document(doc_id=doc_id, on_progress=on_progress, reprocess=True)
+    result = analysis_service.process_document(
+        doc_id=doc_id, on_progress=on_progress, reprocess=True,
+    )
     bar.empty()
     slot.empty()
 
@@ -644,7 +775,10 @@ def _process_document(doc_id: str) -> None:
         st.error(f"Processing failed: {result.message}")
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Main layout
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def _render_main() -> None:
     st.markdown(
         '<div class="app-title">PDF Research Analyzer</div>'
@@ -654,21 +788,20 @@ def _render_main() -> None:
         unsafe_allow_html=True,
     )
 
-    # Mode selector — persisted in session state to survive reruns
     mode = st.radio(
         "mode",
         ["📄 Single PDF", "📚 Batch Upload", "📤 Export"],
-        index    = ["📄 Single PDF", "📚 Batch Upload", "📤 Export"].index(
+        index=["📄 Single PDF", "📚 Batch Upload", "📤 Export"].index(
             st.session_state.get("app_mode", "📄 Single PDF")
         ),
-        horizontal       = True,
-        label_visibility = "collapsed",
-        key              = "mode_radio",
+        horizontal=True,
+        label_visibility="collapsed",
+        key="mode_radio",
     )
-    # Sync to session state so sidebar document clicks restore correct mode
     if mode != st.session_state.get("app_mode"):
-        st.session_state.app_mode    = mode
-        st.session_state.export_data = {}   # clear stale export data on mode switch
+        st.session_state.app_mode       = mode
+        st.session_state.export_data    = {}
+        st.session_state.export_selection = frozenset()
 
     st.markdown("<hr>", unsafe_allow_html=True)
 
@@ -704,34 +837,26 @@ def _render_main() -> None:
 
 
 # ── Empty state ───────────────────────────────────────────────────────────────
+
 def _render_empty_state() -> None:
     st.markdown("""
-    <div style="display:flex;flex-direction:column;align-items:center;
-                justify-content:center;padding:5rem 2rem;text-align:center;
-                animation:fadeIn 0.4s ease;">
-        <div style="font-size:3.5rem;margin-bottom:1.25rem;">📄</div>
-        <div style="font-family:'Lora',serif;font-size:1.6rem;font-weight:600;
-                    letter-spacing:-0.02em;margin-bottom:0.6rem;">
-            Upload a research paper to begin
-        </div>
-        <div style="font-size:0.88rem;color:#857f76;max-width:420px;
-                    line-height:1.7;margin-bottom:2rem;">
+    <div class="empty-state">
+        <div class="empty-icon">📄</div>
+        <div class="empty-title">Upload a research paper to begin</div>
+        <div class="empty-sub">
             Drop a PDF in the sidebar to analyse a single paper,
             or switch to <strong>Batch Upload</strong> to process up to 50 at once.
         </div>
-        <div style="display:flex;gap:1.5rem;flex-wrap:wrap;justify-content:center;">
-            <div style="background:#eee9e0;border-radius:10px;padding:0.75rem 1.25rem;
-                        font-size:0.8rem;color:#504b43;min-width:130px;text-align:center;">
+        <div class="empty-cards">
+            <div class="empty-card">
                 <div style="font-size:1.3rem;margin-bottom:0.3rem;">🔍</div>
                 <div style="font-weight:500;">Search</div>
             </div>
-            <div style="background:#eee9e0;border-radius:10px;padding:0.75rem 1.25rem;
-                        font-size:0.8rem;color:#504b43;min-width:130px;text-align:center;">
+            <div class="empty-card">
                 <div style="font-size:1.3rem;margin-bottom:0.3rem;">💬</div>
                 <div style="font-weight:500;">Chat</div>
             </div>
-            <div style="background:#eee9e0;border-radius:10px;padding:0.75rem 1.25rem;
-                        font-size:0.8rem;color:#504b43;min-width:130px;text-align:center;">
+            <div class="empty-card">
                 <div style="font-size:1.3rem;margin-bottom:0.3rem;">📤</div>
                 <div style="font-weight:500;">Export</div>
             </div>
@@ -741,9 +866,11 @@ def _render_empty_state() -> None:
 
 
 # ── Doc header ────────────────────────────────────────────────────────────────
+
 def _render_doc_header(info: dict) -> None:
     meta   = info.get("metadata", {})
-    chunks = info.get("chunks", {})
+    chunks = info.get("chunks",   {})
+
     c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
     with c1:
         title   = html.escape(meta.get("title") or info.get("filename", ""))
@@ -754,28 +881,38 @@ def _render_doc_header(info: dict) -> None:
             unsafe_allow_html=True,
         )
     with c2:
+        # page_count is the number of pages; "pages" is the page range string
         st.markdown(
-            f'<div class="stat-card"><div class="stat-label">Pages</div>'
-            f'<div class="stat-value">{meta.get("pages", 0)}</div></div>',
+            f'<div class="stat-card">'
+            f'<div class="stat-label">Pages</div>'
+            f'<div class="stat-value">{meta.get("page_count", 0)}</div>'
+            f'</div>',
             unsafe_allow_html=True,
         )
     with c3:
         st.markdown(
-            f'<div class="stat-card"><div class="stat-label">Words</div>'
-            f'<div class="stat-value">{_fmt(meta.get("words", 0))}</div></div>',
+            f'<div class="stat-card">'
+            f'<div class="stat-label">Words</div>'
+            f'<div class="stat-value">{_fmt(meta.get("word_count", 0))}</div>'
+            f'</div>',
             unsafe_allow_html=True,
         )
     with c4:
-        is_ocr = meta.get("language") == "ocr"
+        is_ocr = meta.get("is_ocr") or meta.get("language") == "ocr"
         label  = "Chunks · OCR" if is_ocr else "Chunks"
         st.markdown(
-            f'<div class="stat-card"><div class="stat-label">{label}</div>'
-            f'<div class="stat-value">{chunks.get("total", 0)}</div></div>',
+            f'<div class="stat-card">'
+            f'<div class="stat-label">{label}</div>'
+            f'<div class="stat-value">{chunks.get("total", 0)}</div>'
+            f'</div>',
             unsafe_allow_html=True,
         )
 
 
-# ── Chat tab ──────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Chat tab
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def _render_chat_tab(doc_id: str, info: dict) -> None:
     status = info.get("status")
     if status != "ready":
@@ -789,6 +926,7 @@ def _render_chat_tab(doc_id: str, info: dict) -> None:
 
     history: list[ChatMessage] = st.session_state.chat_history
 
+    # ── Render existing history ───────────────────────────────────────────────
     if not history:
         st.markdown(
             '<div style="text-align:center;padding:2.5rem 1rem;color:#a09890;'
@@ -797,19 +935,20 @@ def _render_chat_tab(doc_id: str, info: dict) -> None:
             unsafe_allow_html=True,
         )
     else:
+        bubble_html = '<div class="chat-wrap">'
         for msg in history:
             if msg.role == MessageRole.USER:
-                st.markdown(
-                    f'<div class="msg-user">{html.escape(msg.content)}</div>',
-                    unsafe_allow_html=True,
+                bubble_html += (
+                    f'<div class="msg-user">{html.escape(msg.content)}</div>'
                 )
             else:
-                st.markdown(
-                    f'<div class="msg-assistant">{_md_to_html(msg.content)}</div>',
-                    unsafe_allow_html=True,
+                bubble_html += (
+                    f'<div class="msg-assistant">{_md_to_html(msg.content)}</div>'
                 )
+        bubble_html += "</div>"
+        st.markdown(bubble_html, unsafe_allow_html=True)
 
-    # Input row
+    # ── Input row ─────────────────────────────────────────────────────────────
     c_in, c_btn, c_clr = st.columns([7, 1, 1])
     with c_in:
         question = st.text_input(
@@ -817,19 +956,25 @@ def _render_chat_tab(doc_id: str, info: dict) -> None:
             placeholder="Ask anything about this paper …",
             label_visibility="collapsed",
             key="chat_input",
+            value=st.session_state.get("pending_question") or "",
         )
     with c_btn:
         send = st.button("Send", type="primary", use_container_width=True, key="send_btn")
     with c_clr:
         if st.button("Clear", use_container_width=True, disabled=not history, key="clear_btn"):
-            st.session_state.chat_history = []
+            st.session_state.chat_history     = []
+            st.session_state.pending_question = None
             st.rerun()
 
-    # Suggested questions — only when no history
+    # Consume pending question (set by suggestion buttons)
+    queued = st.session_state.pop("pending_question", None)
+    effective_question = (question or queued or "").strip()
+
+    # ── Suggested questions — only when no history ────────────────────────────
     if not history:
         st.markdown(
-            '<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.65rem;'
-            'color:#a09890;text-transform:uppercase;letter-spacing:0.08em;'
+            '<div class="mono" style="font-size:0.65rem;color:#a09890;'
+            'text-transform:uppercase;letter-spacing:0.08em;'
             'margin:0.75rem 0 0.4rem;">Suggested questions</div>',
             unsafe_allow_html=True,
         )
@@ -843,28 +988,43 @@ def _render_chat_tab(doc_id: str, info: dict) -> None:
         for col, s in zip(cols, suggestions):
             with col:
                 if st.button(s, key=f"sugg_{hash(s)}", use_container_width=True):
-                    _handle_chat(doc_id, s)
+                    # Queue the question for next render cycle instead of
+                    # calling _handle_chat inline (which races with rerun)
+                    st.session_state.pending_question = s
                     st.rerun()
 
-    if send and question and question.strip():
-        _handle_chat(doc_id, question.strip())
+    # ── Send ──────────────────────────────────────────────────────────────────
+    if (send or queued) and effective_question:
+        # Clear the input for next render
+        st.session_state.chat_input = ""
+        _handle_chat(doc_id, effective_question)
 
 
 def _handle_chat(doc_id: str, question: str) -> None:
+    """
+    Append the user message, stream the assistant reply, append it to history.
+    Does NOT call st.rerun() — the chat tab re-renders naturally on the next
+    interaction; the streaming output is shown via st.empty() slots.
+    After streaming completes, history is complete so the NEXT full render
+    will show it correctly without duplicating anything.
+    """
     try:
         st.session_state.chat_history.append(
             ChatMessage(role=MessageRole.USER, content=question)
         )
         if len(st.session_state.chat_history) > MAX_CHAT_HISTORY:
-            st.session_state.chat_history = st.session_state.chat_history[-MAX_CHAT_HISTORY:]
+            st.session_state.chat_history = (
+                st.session_state.chat_history[-MAX_CHAT_HISTORY:]
+            )
 
+        # Show user bubble immediately
         st.markdown(
             f'<div class="msg-user">{html.escape(question)}</div>',
             unsafe_allow_html=True,
         )
 
-        typing = st.empty()
-        typing.markdown(
+        typing_slot = st.empty()
+        typing_slot.markdown(
             '<div class="typing-indicator">'
             '<div class="typing-dot"></div>'
             '<div class="typing-dot"></div>'
@@ -873,28 +1033,32 @@ def _handle_chat(doc_id: str, question: str) -> None:
             unsafe_allow_html=True,
         )
 
-        container  = st.empty()
+        reply_slot = st.empty()
         full_reply = ""
 
         stream = analysis_service.chat_stream(
-            doc_id  = doc_id,
-            question= question,
-            history = st.session_state.chat_history[:-1],
+            doc_id   = doc_id,
+            question = question,
+            # Pass history excluding the message we just appended
+            history  = st.session_state.chat_history[:-1],
         )
 
         for token in stream:
             if not token:
                 continue
             full_reply += str(token)
-            typing.empty()
-            container.markdown(
-                f'<div class="msg-assistant">{_md_to_html(full_reply)}'
-                f'<span style="color:var(--accent);">▌</span></div>',
+            typing_slot.empty()
+            reply_slot.markdown(
+                f'<div class="msg-assistant">'
+                f'{_md_to_html(full_reply)}'
+                f'<span style="color:var(--accent);">▌</span>'
+                f'</div>',
                 unsafe_allow_html=True,
             )
 
-        typing.empty()
-        container.markdown(
+        typing_slot.empty()
+        # Final render without cursor
+        reply_slot.markdown(
             f'<div class="msg-assistant">{_md_to_html(full_reply)}</div>',
             unsafe_allow_html=True,
         )
@@ -907,15 +1071,20 @@ def _handle_chat(doc_id: str, question: str) -> None:
         )
 
     except Exception as e:
-        logger.error("Chat failed: %s", e)
+        logger.error("Chat failed: %s", e, exc_info=True)
         st.error("⚠️ Chat error. Please try again.")
-        # Remove the user message we appended since chat failed
-        if st.session_state.chat_history and \
-                st.session_state.chat_history[-1].role == MessageRole.USER:
+        # Roll back the user message so history stays consistent
+        if (
+            st.session_state.chat_history
+            and st.session_state.chat_history[-1].role == MessageRole.USER
+        ):
             st.session_state.chat_history.pop()
 
 
-# ── Sections tab ──────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sections tab
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def _render_sections_tab(doc_id: str, info: dict) -> None:
     sections = info.get("sections", [])
     if not sections:
@@ -936,11 +1105,9 @@ def _render_sections_tab(doc_id: str, info: dict) -> None:
     labels = [s.value.capitalize() for s in available]
     idx    = st.selectbox(
         "Section", range(len(labels)),
-        format_func=lambda i: labels[i],
-        label_visibility="collapsed",
+        format_func      = lambda i: labels[i],
+        label_visibility = "collapsed",
     )
-    if idx is None:
-        return
 
     sel  = available[idx]
     meta = s_map[sel.value]
@@ -965,7 +1132,10 @@ def _render_sections_tab(doc_id: str, info: dict) -> None:
         st.info("Section content not available.")
 
 
-# ── Search tab ────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Search tab
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def _render_search_tab(doc_id: str) -> None:
     c1, c2 = st.columns([6, 1])
     with c1:
@@ -990,8 +1160,8 @@ def _render_search_tab(doc_id: str) -> None:
                 return
 
             st.markdown(
-                f'<div style="font-family:\'JetBrains Mono\',monospace;'
-                f'font-size:0.7rem;color:var(--muted);margin-bottom:0.75rem;">'
+                f'<div class="mono" style="font-size:0.7rem;color:var(--muted);'
+                f'margin-bottom:0.75rem;">'
                 f'{results.total_found} result{"s" if results.total_found != 1 else ""}'
                 f' &nbsp;·&nbsp; {results.search_time_ms:.0f}ms</div>',
                 unsafe_allow_html=True,
@@ -1005,7 +1175,9 @@ def _render_search_tab(doc_id: str) -> None:
                 <div class="result-card">
                     <div style="display:flex;justify-content:space-between;
                                 align-items:center;margin-bottom:0.4rem;">
-                        <span class="result-section-tag">{r.chunk.section_type.value}</span>
+                        <span class="result-section-tag">
+                            {r.chunk.section_type.value}
+                        </span>
                         <span class="result-score">{pct}% match</span>
                     </div>
                     <div class="result-text">{text}{dots}</div>
@@ -1013,7 +1185,10 @@ def _render_search_tab(doc_id: str) -> None:
                 """, unsafe_allow_html=True)
 
 
-# ── Info tab ──────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Info tab
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def _render_info_tab(info: dict) -> None:
     meta   = info.get("metadata", {})
     chunks = info.get("chunks",   {})
@@ -1026,26 +1201,28 @@ def _render_info_tab(info: dict) -> None:
     )
     c1, c2 = st.columns(2)
     with c1:
-        _meta_block("Title",     meta.get("title")   or "—")
+        _meta_block("Title",     meta.get("title")     or "—")
         _meta_block("Authors",   ", ".join(meta.get("authors", [])) or "—")
-        _meta_block("Journal",   meta.get("journal") or "—")
+        _meta_block("Journal",   meta.get("journal")   or "—")
         _meta_block("Publisher", meta.get("publisher") or "—")
         lang = meta.get("language", "en")
-        lang_display = "🔍 OCR Processed" if lang == "ocr" else lang.upper()
-        _meta_block("Language / Mode", lang_display)
+        _meta_block("Language / Mode", "🔍 OCR Processed" if lang == "ocr" else lang.upper())
     with c2:
-        _meta_block("Pages",     str(meta.get("pages", 0)),  large=True)
-        _meta_block("Words",     _fmt(meta.get("words", 0)), large=True)
-        _meta_block("DOI",       meta.get("doi")    or "—")
-        _meta_block("ISSN",      meta.get("issn")   or "—")
+        # page_count = number of pages; pages = page range string e.g. "7-14"
+        _meta_block("Page Count", str(meta.get("page_count", 0)), large=True)
+        _meta_block("Words",      _fmt(meta.get("word_count", 0)), large=True)
+        _meta_block("DOI",        meta.get("doi")  or "—")
+        _meta_block("ISSN",       meta.get("issn") or "—")
         vol   = meta.get("volume", "")
         issue = meta.get("issue",  "")
         vol_issue = (
-            (f"Vol {vol}" if vol else "") +
-            (f", No {issue}" if issue else "")
+            (f"Vol {vol}" if vol else "") + (f", No {issue}" if issue else "")
         ) or "—"
         _meta_block("Vol / Issue", vol_issue)
-        _meta_block("File Size", meta.get("file_size", "—"))
+        # Correct key: file_size_bytes from schema; may be exposed as file_size in info dict
+        raw_size = meta.get("file_size_bytes") or meta.get("file_size") or 0
+        size_str = f"{raw_size / 1024:.1f} KB" if raw_size else "—"
+        _meta_block("File Size", size_str)
 
     # Keywords
     kws = meta.get("keywords", [])
@@ -1056,15 +1233,11 @@ def _render_info_tab(info: dict) -> None:
             unsafe_allow_html=True,
         )
         kw_html = " ".join(
-            f'<span style="display:inline-block;background:var(--surface);'
-            f'border:1px solid var(--border);border-radius:20px;'
-            f'padding:0.18rem 0.65rem;font-family:\'JetBrains Mono\',monospace;'
-            f'font-size:0.68rem;margin:0.2rem 0.2rem 0 0;color:var(--ink);">'
-            f'{html.escape(k)}</span>'
-            for k in kws
+            f'<span class="kw-pill">{html.escape(k)}</span>' for k in kws
         )
         st.markdown(kw_html, unsafe_allow_html=True)
 
+    # Sections
     st.markdown(
         '<div style="font-family:\'Lora\',serif;font-size:1.1rem;'
         'font-weight:600;margin:1.5rem 0 0.75rem;">Sections Detected</div>',
@@ -1074,8 +1247,7 @@ def _render_info_tab(info: dict) -> None:
         rows = "".join(
             f'<div class="section-row">'
             f'<span style="font-weight:500;">{s["type"].capitalize()}</span>'
-            f'<span style="font-family:\'JetBrains Mono\',monospace;'
-            f'font-size:0.72rem;color:var(--muted);">'
+            f'<span class="mono" style="font-size:0.72rem;color:var(--muted);">'
             f'{_fmt(s["word_count"])} words · p.{s["page_start"]+1}</span>'
             f'</div>'
             for s in secs
@@ -1088,6 +1260,7 @@ def _render_info_tab(info: dict) -> None:
     else:
         st.info("No sections detected.")
 
+    # Vector index
     st.markdown(
         '<div style="font-family:\'Lora\',serif;font-size:1.1rem;'
         'font-weight:600;margin:1.5rem 0 0.75rem;">Vector Index</div>',
@@ -1117,13 +1290,16 @@ def _meta_block(label: str, value: str, large: bool = False) -> None:
     )
 
 
-# ── Batch tab ─────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Batch tab
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def _render_batch_tab() -> None:
     st.markdown(
         '<div style="font-family:\'Lora\',serif;font-size:1.3rem;'
         'font-weight:600;margin-bottom:0.25rem;">Batch Upload</div>'
-        '<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.7rem;'
-        'color:var(--muted);margin-bottom:1.5rem;">Upload 1–50 PDFs and process them all at once</div>',
+        '<div class="mono" style="font-size:0.7rem;color:var(--muted);'
+        'margin-bottom:1.5rem;">Upload 1–50 PDFs and process them all at once</div>',
         unsafe_allow_html=True,
     )
 
@@ -1150,22 +1326,32 @@ def _render_batch_tab() -> None:
         st.error(f"Maximum 50 PDFs per batch. You selected {count}. Please remove some files.")
         return
 
+    # Read all bytes NOW while UploadedFile objects are still valid.
+    # After any rerun or widget interaction they may be unreadable.
+    files: list[tuple[bytes, str]] = []
+    for f in uploaded_files:
+        try:
+            data = f.getvalue()
+        except Exception:
+            data = f.read()
+        files.append((data, f.name))
+
     st.markdown(
-        f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.75rem;'
-        f'color:var(--muted);margin-bottom:1rem;">'
+        f'<div class="mono" style="font-size:0.75rem;color:var(--muted);'
+        f'margin-bottom:1rem;">'
         f'{count} file{"s" if count != 1 else ""} selected</div>',
         unsafe_allow_html=True,
     )
 
-    # Preview list (first 15)
+    # Preview (first 15 rows — sizes from already-read bytes)
     preview_rows = "".join(
         f'<div class="batch-row">'
         f'<span>📄</span>'
-        f'<span style="flex:1;">{html.escape(f.name[:50])}</span>'
-        f'<span style="font-family:\'JetBrains Mono\',monospace;font-size:0.7rem;'
-        f'color:var(--muted);">{round(len(f.getvalue())/1024,1)} KB</span>'
+        f'<span style="flex:1;">{html.escape(name[:50])}</span>'
+        f'<span class="mono" style="font-size:0.7rem;color:var(--muted);">'
+        f'{round(len(data) / 1024, 1)} KB</span>'
         f'</div>'
-        for f in uploaded_files[:15]
+        for data, name in files[:15]
     )
     if count > 15:
         preview_rows += (
@@ -1179,11 +1365,11 @@ def _render_batch_tab() -> None:
     )
 
     if st.button(f"▶ Process All {count} PDFs", type="primary", key="batch_run"):
-        _run_batch(uploaded_files)
+        _run_batch(files)
 
 
-def _run_batch(uploaded_files) -> None:
-    total      = len(uploaded_files)
+def _run_batch(files: list[tuple[bytes, str]]) -> None:
+    total      = len(files)
     bar        = st.progress(0, text="Starting batch …")
     status_el  = st.empty()
     results_el = st.empty()
@@ -1193,8 +1379,8 @@ def _run_batch(uploaded_files) -> None:
         pct = max(0.0, min((current - 1) / total, 1.0))
         bar.progress(pct, text=f"[{current}/{total}] {filename[:40]} …")
         status_el.markdown(
-            f'<div style="font-family:\'JetBrains Mono\',monospace;'
-            f'font-size:0.72rem;color:var(--muted);">Processing: {html.escape(filename)}</div>',
+            f'<div class="mono" style="font-size:0.72rem;color:var(--muted);">'
+            f'Processing: {html.escape(filename)}</div>',
             unsafe_allow_html=True,
         )
 
@@ -1209,13 +1395,17 @@ def _run_batch(uploaded_files) -> None:
         })
         html_rows = "".join(
             f'<div class="batch-row">'
-            f'<span style="color:{r["color"]};font-weight:700;min-width:1rem;">{r["icon"]}</span>'
+            f'<span style="color:{r["color"]};font-weight:700;min-width:1rem;">'
+            f'{r["icon"]}</span>'
             f'<span style="flex:1;">{html.escape(r["filename"][:40])}</span>'
-            f'<span style="font-family:\'JetBrains Mono\',monospace;font-size:0.7rem;color:var(--muted);">'
-            + (f'{r["pages"]}p · {r["words"]:,}w · {r["chunks"]} chunks'
-               if r["status"] == "ready"
-               else f'<span style="color:var(--accent);">{html.escape(r["error"][:40])}</span>')
-            + '</span></div>'
+            f'<span class="mono" style="font-size:0.7rem;color:var(--muted);">'
+            + (
+                f'{r["pages"]}p · {r["words"]:,}w · {r["chunks"]} chunks'
+                if r["status"] == "ready"
+                else f'<span style="color:var(--accent);">'
+                     f'{html.escape((r["error"] or "")[:40])}</span>'
+            )
+            + "</span></div>"
             for r in rows
         )
         results_el.markdown(
@@ -1223,14 +1413,6 @@ def _run_batch(uploaded_files) -> None:
             f'overflow:hidden;margin-top:0.5rem;">{html_rows}</div>',
             unsafe_allow_html=True,
         )
-
-    # Read all file bytes before processing (files can't be re-read after)
-    files = []
-    for f in uploaded_files:
-        try:
-            files.append((f.getvalue(), f.name))
-        except Exception:
-            files.append((f.read(), f.name))
 
     result = batch_service.process_batch(
         files, on_item_start=on_start, on_item_done=on_done,
@@ -1250,7 +1432,6 @@ def _run_batch(uploaded_files) -> None:
             + (" …" if len(failed_names) > 5 else "")
         )
 
-    # Auto-select first successful doc
     for item in result.items:
         if item.status == "ready" and item.doc_id:
             st.session_state.active_doc_id = item.doc_id
@@ -1259,13 +1440,16 @@ def _run_batch(uploaded_files) -> None:
     st.rerun()
 
 
-# ── Export tab ────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Export tab
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def _render_export_tab() -> None:
     st.markdown(
         '<div style="font-family:\'Lora\',serif;font-size:1.3rem;'
         'font-weight:600;margin-bottom:0.25rem;">Export</div>'
-        '<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.7rem;'
-        'color:var(--muted);margin-bottom:1.5rem;">'
+        '<div class="mono" style="font-size:0.7rem;color:var(--muted);'
+        'margin-bottom:1.5rem;">'
         'Download extracted metadata — XLSX · DOCX · CSV · JSON</div>',
         unsafe_allow_html=True,
     )
@@ -1280,14 +1464,12 @@ def _render_export_tab() -> None:
     all_names = [d["filename"] for d in ready_docs]
     selected  = st.multiselect(
         "Select documents to export",
-        options  = all_names,
-        default  = all_names,
-        key      = "export_select",
+        options = all_names,
+        default = all_names,
+        key     = "export_select",
     )
 
-    selected_ids = [
-        d["doc_id"] for d in ready_docs if d["filename"] in selected
-    ]
+    selected_ids = [d["doc_id"] for d in ready_docs if d["filename"] in selected]
 
     if not selected_ids:
         st.warning("Select at least one document to export.", icon="⚠️")
@@ -1296,81 +1478,68 @@ def _render_export_tab() -> None:
     st.caption(f"{len(selected_ids)} document(s) selected")
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # ── Export format cards ───────────────────────────────────────────────────
-    # BUG FIX: Generate + Download in one click using session_state cache.
-    # Previously, "Generate" triggered a rerun which lost the bytes before
-    # download_button could render. Now we store bytes in session_state.
+    # Invalidate cached exports if the selection changed
+    current_sel = frozenset(selected_ids)
+    if current_sel != st.session_state.export_selection:
+        st.session_state.export_data      = {}
+        st.session_state.export_selection = current_sel
 
-    c1, c2, c3, c4 = st.columns(4)
     export_cache = st.session_state.export_data
+    generating   = st.session_state.generating
 
-    with c1:
-        st.markdown("**📊 Excel (XLSX)**")
-        st.caption("Matches your metadata template")
-        if st.button("Generate XLSX", type="primary", use_container_width=True, key="gen_xlsx"):
-            with st.spinner("Building …"):
-                try:
-                    export_cache["xlsx"] = export_service.export_xlsx(selected_ids)
-                except Exception as e:
-                    st.error(f"XLSX export failed: {e}")
-        if "xlsx" in export_cache:
-            data, fname = export_cache["xlsx"]
-            st.download_button(
-                "⬇ Download XLSX", data=data, file_name=fname,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True, key="dl_xlsx",
-            )
+    # ── Export format cards ───────────────────────────────────────────────────
+    # Pattern: Generate button checks a "generating" flag to prevent double-clicks.
+    # Bytes are stored in session_state so they survive the rerun after generation.
 
-    with c2:
-        st.markdown("**📝 Word (DOCX)**")
-        st.caption("Formatted report per document")
-        if st.button("Generate DOCX", type="primary", use_container_width=True, key="gen_docx"):
-            with st.spinner("Building …"):
-                try:
-                    export_cache["docx"] = export_service.export_docx(selected_ids)
-                except Exception as e:
-                    st.error(f"DOCX export failed: {e}")
-        if "docx" in export_cache:
-            data, fname = export_cache["docx"]
-            st.download_button(
-                "⬇ Download DOCX", data=data, file_name=fname,
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True, key="dl_docx",
-            )
+    _FORMATS = [
+        ("xlsx", "📊 Excel (XLSX)", "Matches your metadata template",
+         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+         lambda ids: export_service.export_xlsx(ids)),
+        ("docx", "📝 Word (DOCX)", "Formatted report per document",
+         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+         lambda ids: export_service.export_docx(ids)),
+        ("csv",  "📋 CSV",         "Plain text, importable anywhere",
+         "text/csv",
+         lambda ids: export_service.export_csv(ids)),
+        ("json", "🔗 JSON",        "For API / integration use",
+         "application/json",
+         lambda ids: export_service.export_json(ids)),
+    ]
 
-    with c3:
-        st.markdown("**📋 CSV**")
-        st.caption("Plain text, importable anywhere")
-        if st.button("Generate CSV", type="primary", use_container_width=True, key="gen_csv"):
-            with st.spinner("Building …"):
-                try:
-                    export_cache["csv"] = export_service.export_csv(selected_ids)
-                except Exception as e:
-                    st.error(f"CSV export failed: {e}")
-        if "csv" in export_cache:
-            data, fname = export_cache["csv"]
-            st.download_button(
-                "⬇ Download CSV", data=data, file_name=fname,
-                mime="text/csv", use_container_width=True, key="dl_csv",
-            )
+    cols = st.columns(len(_FORMATS))
+    for col, (fmt, title, caption, mime, fn) in zip(cols, _FORMATS):
+        with col:
+            st.markdown(f"**{title}**")
+            st.caption(caption)
 
-    with c4:
-        st.markdown("**🔗 JSON**")
-        st.caption("For API / integration use")
-        if st.button("Generate JSON", type="primary", use_container_width=True, key="gen_json"):
-            with st.spinner("Building …"):
-                try:
-                    export_cache["json"] = export_service.export_json(selected_ids)
-                except Exception as e:
-                    st.error(f"JSON export failed: {e}")
-        if "json" in export_cache:
-            data, fname = export_cache["json"]
-            st.download_button(
-                "⬇ Download JSON", data=data, file_name=fname,
-                mime="application/json", use_container_width=True, key="dl_json",
-            )
+            is_generating = generating.get(fmt, False)
+            if st.button(
+                f"{'⏳ Generating…' if is_generating else 'Generate'} {fmt.upper()}",
+                type             = "primary",
+                use_container_width = True,
+                key              = f"gen_{fmt}",
+                disabled         = is_generating,
+            ):
+                generating[fmt] = True
+                with st.spinner("Building …"):
+                    try:
+                        export_cache[fmt] = fn(selected_ids)
+                    except Exception as e:
+                        st.error(f"{fmt.upper()} export failed: {e}")
+                generating[fmt] = False
 
-    # Preview table
+            if fmt in export_cache:
+                data, fname = export_cache[fmt]
+                st.download_button(
+                    f"⬇ Download {fmt.upper()}",
+                    data                = data,
+                    file_name           = fname,
+                    mime                = mime,
+                    use_container_width = True,
+                    key                 = f"dl_{fmt}",
+                )
+
+    # ── Preview table ─────────────────────────────────────────────────────────
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown(
         '<div style="font-family:\'Lora\',serif;font-size:1rem;'
@@ -1380,8 +1549,8 @@ def _render_export_tab() -> None:
     rows_html = "".join(
         f'<div class="batch-row">'
         f'<span style="flex:2;">{html.escape(d["filename"][:45])}</span>'
-        f'<span style="font-family:\'JetBrains Mono\',monospace;font-size:0.7rem;'
-        f'color:var(--success);">● ready</span>'
+        f'<span class="mono" style="font-size:0.7rem;color:var(--success);">'
+        f'● ready</span>'
         f'</div>'
         for d in ready_docs if d["filename"] in selected
     )
@@ -1393,7 +1562,10 @@ def _render_export_tab() -> None:
         )
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Entry point
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def main() -> None:
     _init_session()
     _run_startup()
