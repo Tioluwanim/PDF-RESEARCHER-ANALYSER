@@ -6,11 +6,11 @@ pytesseract>=0.3.10
 pdf2image>=1.17.0
 Pillow>=10.0.0
 
-sentence-transformers>=2.7.0
-transformers>=4.38.0,<4.47.0
-tokenizers>=0.15,<0.20
+sentence-transformers>=3.0.0
+transformers>=4.45.0
+tokenizers>=0.20.0
 
-torch==2.2.2
+torch>=2.9.0
 faiss-cpu>=1.8.0
 
 numpy>=1.26.0
