@@ -51,12 +51,10 @@ class PDFService:
         filename: str,
     ) -> tuple[ProcessedDocument, None] | tuple[None, ErrorResponse]:
         """
-        Validates and saves an uploaded PDF to disk.
-        Creates a ProcessedDocument with UPLOADED status.
-
-        Args:
-            file_bytes: Raw bytes of the uploaded file.
-            filename:   Original filename from the upload widget.
+        Validates and saves an uploaded file to disk.
+        Supports: PDF, DOCX, DOC, TXT, XLSX, XLS, CSV.
+        Non-PDF files are converted to a text-based PDF wrapper so the
+        rest of the pipeline (extraction → embedding → RAG) works unchanged.
 
         Returns:
             (ProcessedDocument, None) on success.
@@ -64,35 +62,77 @@ class PDFService:
         """
         slog = ServiceLogger("pdf_service")
 
-        # ── Validate extension ────────────────────────────────────────────────
         suffix = Path(filename).suffix.lower()
         if suffix not in ALLOWED_EXTENSIONS:
-            msg = f"Invalid file type '{suffix}'. Only PDF files are allowed."
+            msg = (
+                f"Unsupported file type '{suffix}'. "
+                f"Supported: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
+            )
             slog.warning(msg)
             return None, ErrorResponse(error="Invalid file type", detail=msg)
 
-        # ── Validate file size ────────────────────────────────────────────────
         file_size = len(file_bytes)
         if file_size == 0:
-            msg = "Uploaded file is empty."
-            slog.warning(msg)
-            return None, ErrorResponse(error="Empty file", detail=msg)
-
+            return None, ErrorResponse(error="Empty file", detail="Uploaded file is empty.")
         if file_size > MAX_FILE_SIZE_BYTES:
             msg = (
                 f"File size {file_size / (1024*1024):.1f} MB exceeds "
                 f"the {MAX_FILE_SIZE_MB} MB limit."
             )
-            slog.warning(msg)
             return None, ErrorResponse(error="File too large", detail=msg)
+
+        # ── For non-PDF files: extract text and wrap as a .pdf on disk ────────
+        if suffix != ".pdf":
+            try:
+                text = _extract_text_from_file(file_bytes, suffix, filename)
+                if not text.strip():
+                    return None, ErrorResponse(
+                        error="Empty content",
+                        detail=f"Could not extract any text from '{filename}'.",
+                    )
+                # Wrap as minimal PDF using PyMuPDF
+                import fitz
+                pdf_doc  = fitz.open()
+                page     = pdf_doc.new_page()
+                # Insert text with automatic wrapping
+                page.insert_textbox(
+                    fitz.Rect(50, 50, 562, 792),
+                    text,
+                    fontsize  = 9,
+                    fontname  = "helv",
+                    align     = 0,
+                )
+                # If text overflows one page, add more pages
+                if len(text) > 4000:
+                    chunks = [text[i:i+4000] for i in range(4000, len(text), 4000)]
+                    for chunk in chunks:
+                        pg = pdf_doc.new_page()
+                        pg.insert_textbox(
+                            fitz.Rect(50, 50, 562, 792),
+                            chunk, fontsize=9, fontname="helv", align=0,
+                        )
+                file_bytes = pdf_doc.tobytes()
+                pdf_doc.close()
+                # Keep original name but save as .pdf
+                filename   = Path(filename).stem + ".pdf"
+                slog.info(
+                    "Converted '%s' (%s) → PDF (%d bytes, %d chars text)",
+                    filename, suffix, len(file_bytes), len(text),
+                )
+            except Exception as e:
+                return None, ErrorResponse(
+                    error="Conversion failed",
+                    detail=f"Could not convert '{filename}' to PDF: {e}",
+                )
 
         # ── Validate PDF magic bytes ──────────────────────────────────────────
         if not file_bytes.startswith(b"%PDF"):
-            msg = "File does not appear to be a valid PDF (missing PDF header)."
-            slog.warning(msg)
-            return None, ErrorResponse(error="Invalid PDF", detail=msg)
+            return None, ErrorResponse(
+                error="Invalid PDF",
+                detail="File does not appear to be a valid PDF.",
+            )
 
-        # ── Generate unique doc_id ────────────────────────────────────────────
+        # ── Save to disk ──────────────────────────────────────────────────────
         doc_id    = str(uuid.uuid4())
         safe_name = self._sanitize_filename(filename)
         dest_path = self.upload_dir / f"{doc_id}_{safe_name}"
@@ -316,3 +356,94 @@ class PDFService:
 # ── Module-level singleton ────────────────────────────────────────────────────
 # Services import this instance directly — no need to instantiate.
 pdf_service = PDFService()
+
+
+# ── File-to-text converters ───────────────────────────────────────────────────
+
+def _extract_text_from_file(file_bytes: bytes, suffix: str, filename: str) -> str:
+    """
+    Extract plain text from a non-PDF file.
+    Supports: .docx, .doc, .txt, .xlsx, .xls, .csv
+
+    Returns extracted text as a single string.
+    Raises on unrecoverable errors.
+    """
+    import io as _io
+
+    # ── Plain text ────────────────────────────────────────────────────────────
+    if suffix == ".txt":
+        for enc in ("utf-8", "latin-1", "cp1252"):
+            try:
+                return file_bytes.decode(enc)
+            except UnicodeDecodeError:
+                continue
+        return file_bytes.decode("utf-8", errors="replace")
+
+    # ── CSV ───────────────────────────────────────────────────────────────────
+    if suffix == ".csv":
+        import csv as _csv
+        text_io = _io.StringIO(file_bytes.decode("utf-8-sig", errors="replace"))
+        reader  = _csv.reader(text_io)
+        rows    = list(reader)
+        if not rows:
+            return ""
+        # Build readable text: header as labels, rows as key:value lines
+        header = rows[0]
+        lines  = ["\t".join(header)]
+        for row in rows[1:]:
+            pairs = [f"{h}: {v}" for h, v in zip(header, row) if v.strip()]
+            lines.append("  |  ".join(pairs))
+        return "\n".join(lines)
+
+    # ── DOCX ──────────────────────────────────────────────────────────────────
+    if suffix in (".docx",):
+        try:
+            from docx import Document as _DocxDoc
+            docx    = _DocxDoc(_io.BytesIO(file_bytes))
+            parts   = [p.text for p in docx.paragraphs if p.text.strip()]
+            # Also extract tables
+            for table in docx.tables:
+                for row in table.rows:
+                    row_text = "  |  ".join(
+                        c.text.strip() for c in row.cells if c.text.strip()
+                    )
+                    if row_text:
+                        parts.append(row_text)
+            return "\n\n".join(parts)
+        except ImportError:
+            raise RuntimeError("python-docx not installed. Add it to requirements.txt.")
+
+    # ── DOC (legacy Word) ─────────────────────────────────────────────────────
+    if suffix == ".doc":
+        # Try antiword-style extraction via python-docx (sometimes works)
+        # Otherwise fall back to raw text extraction
+        try:
+            from docx import Document as _DocxDoc
+            docx  = _DocxDoc(_io.BytesIO(file_bytes))
+            parts = [p.text for p in docx.paragraphs if p.text.strip()]
+            return "\n\n".join(parts)
+        except Exception:
+            # Raw fallback: extract printable ASCII from binary
+            raw = file_bytes.decode("latin-1", errors="replace")
+            return "\n".join(
+                line for line in raw.splitlines()
+                if len(line.strip()) > 20 and line.strip().isprintable()
+            )
+
+    # ── XLSX / XLS ────────────────────────────────────────────────────────────
+    if suffix in (".xlsx", ".xls"):
+        try:
+            import openpyxl
+            wb    = openpyxl.load_workbook(_io.BytesIO(file_bytes), data_only=True)
+            parts : list[str] = []
+            for sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+                parts.append(f"=== Sheet: {sheet_name} ===")
+                for row in ws.iter_rows(values_only=True):
+                    row_vals = [str(v) if v is not None else "" for v in row]
+                    non_empty = [v for v in row_vals if v.strip()]
+                    if non_empty:
+                        parts.append("  |  ".join(non_empty))
+            return "\n".join(parts)
+        except ImportError:
+            raise RuntimeError("openpyxl not installed. Add it to requirements.txt.")

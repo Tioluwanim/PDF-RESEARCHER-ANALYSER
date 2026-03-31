@@ -120,7 +120,7 @@ RETRY_BACKOFF_FACTOR = float(os.getenv("RETRY_BACKOFF_FACTOR", "2.0"))
 # ─────────────────────────────────────────────────────────────────────────────
 MAX_FILE_SIZE_MB    = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
-ALLOWED_EXTENSIONS  = {".pdf"}
+ALLOWED_EXTENSIONS  = {".pdf", ".docx", ".doc", ".txt", ".xlsx", ".xls", ".csv"}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Streamlit UI
