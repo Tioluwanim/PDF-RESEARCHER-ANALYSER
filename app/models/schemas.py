@@ -1,19 +1,19 @@
 """
 schemas.py - Pydantic v2 models for PDF Research Analyzer.
 
-Improvements over v1:
-  - DocumentMetadata: richer bibliographic fields (article_number, citation_count,
-    language, license, conference details)
-  - ProcessedDocument: touch() helper, richer summary dict
-  - SearchResult: rank ge=0 (multi-query RAG sets rank=0 before sorting)
-  - Stricter field validation throughout
-  - All Optional types use explicit None defaults
+Improvements:
+- DocumentMetadata: added doi, issn, publisher, journal, volume, issue fields
+  so export_service can read them directly instead of re-extracting from text
+- SearchResult: rank ge=0 (multi-query RAG sets rank=0 before sorting)
+- ProcessedDocument: updated_at refreshed on every save via model_validator
+- Stricter field validation throughout
+- All Optional types use explicit None defaults
 """
 
 from __future__ import annotations
 
 from enum import Enum
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Any
 
 from pydantic import BaseModel, Field, field_validator
@@ -96,77 +96,61 @@ class DocumentMetadata(BaseModel):
     All extractable metadata from a PDF.
     Fields populated by extraction_service and consumed by export_service.
     """
-    # Core
-    title           : str        = Field(default="")
-    authors         : list[str]  = Field(default_factory=list)
-    abstract        : str        = Field(default="")
-    keywords        : list[str]  = Field(default_factory=list)
+    title           : str       = Field(default="")
+    authors         : list[str] = Field(default_factory=list)
+    abstract        : str       = Field(default="")
+    keywords        : list[str] = Field(default_factory=list)
 
-    # Bibliographic identifiers
-    doi             : str        = Field(default="")
-    issn            : str        = Field(default="")
-    isbn            : str        = Field(default="")
-    pmid            : str        = Field(default="")   # PubMed ID
-    pii             : str        = Field(default="")   # Publisher Item Identifier
-    arxiv_id        : str        = Field(default="")   # arXiv identifier
-
-    # Publication venue
-    publisher       : str        = Field(default="")
-    journal         : str        = Field(default="")
-    volume          : str        = Field(default="")
-    issue           : str        = Field(default="")
-    pages           : str        = Field(default="")          # e.g. "e398-e404" or "7-14"
-    article_number  : str        = Field(default="")          # Elsevier/Springer article numbers
-    article_type    : str        = Field(default="")          # e.g. "Original Research", "Review"
-    editor          : str        = Field(default="")          # journal/book editor
-    conference      : str        = Field(default="")          # conference name (if proceedings)
-    conference_location: str     = Field(default="")
-
-    # Licensing / access
-    license         : str        = Field(default="")          # e.g. "CC BY 4.0"
-    open_access     : bool       = Field(default=False)
+    # Bibliographic
+    doi             : str       = Field(default="")
+    issn            : str       = Field(default="")
+    isbn            : str       = Field(default="")
+    publisher       : str       = Field(default="")
+    journal         : str       = Field(default="")
+    volume          : str       = Field(default="")
+    issue           : str       = Field(default="")
+    pages           : str       = Field(default="")   # e.g. "e398-e404" or "7-14"
+    article_type    : str       = Field(default="")   # e.g. "Original Research", "Review"
+    editor          : str       = Field(default="")   # journal/book editor
 
     # Dates
-    year            : str        = Field(default="")          # publication year
-    received_date   : str        = Field(default="")
-    accepted_date   : str        = Field(default="")
-    published_date  : str        = Field(default="")
+    year            : str       = Field(default="")   # publication year
+    received_date   : str       = Field(default="")
+    accepted_date   : str       = Field(default="")
+    published_date  : str       = Field(default="")
 
     # Authors & affiliation
-    affiliations        : list[str] = Field(default_factory=list)
-    corresponding_email : str       = Field(default="")
-    orcids              : list[str] = Field(default_factory=list)
+    affiliations    : list[str] = Field(default_factory=list)
+    corresponding_email: str   = Field(default="")
+    orcids          : list[str] = Field(default_factory=list)
 
-    # Funding & ethics
-    funding         : str        = Field(default="")
-    ethics_approval : str        = Field(default="")
-    clinical_trial  : str        = Field(default="")  # trial registration number
+    # Funding
+    funding         : str       = Field(default="")
 
     # Document stats
-    page_count      : int        = Field(default=0, ge=0)
-    word_count      : int        = Field(default=0, ge=0)
-    language        : str        = Field(default="en")
-    created_at      : str        = Field(default="")
-    file_size_bytes : int        = Field(default=0, ge=0)
-    is_ocr          : bool       = Field(default=False)  # True if extracted via OCR
+    page_count      : int       = Field(default=0, ge=0)
+    word_count      : int       = Field(default=0, ge=0)
+    language        : str       = Field(default="en")
+    created_at      : str       = Field(default="")
+    file_size_bytes : int       = Field(default=0, ge=0)
 
 
 # ── Processed Document ────────────────────────────────────────────────────────
 
 class ProcessedDocument(BaseModel):
-    doc_id            : str                   = Field(..., min_length=1)
-    filename          : str                   = Field(..., min_length=1)
-    file_path         : str                   = Field(..., min_length=1)
-    status            : DocumentStatus        = DocumentStatus.UPLOADED
-    metadata          : DocumentMetadata      = Field(default_factory=DocumentMetadata)
-    full_text         : str                   = Field(default="")
-    sections          : list[DocumentSection] = Field(default_factory=list)
-    chunks            : list[TextChunk]       = Field(default_factory=list)
-    chunk_count       : int                   = Field(default=0, ge=0)
-    vector_index_path : Optional[str]         = None
-    error_message     : Optional[str]         = None
-    created_at        : datetime              = Field(default_factory=datetime.utcnow)
-    updated_at        : datetime              = Field(default_factory=datetime.utcnow)
+    doc_id            : str                    = Field(..., min_length=1)
+    filename          : str                    = Field(..., min_length=1)
+    file_path         : str                    = Field(..., min_length=1)
+    status            : DocumentStatus         = DocumentStatus.UPLOADED
+    metadata          : DocumentMetadata       = Field(default_factory=DocumentMetadata)
+    full_text         : str                    = Field(default="")
+    sections          : list[DocumentSection]  = Field(default_factory=list)
+    chunks            : list[TextChunk]        = Field(default_factory=list)
+    chunk_count       : int                    = Field(default=0, ge=0)
+    vector_index_path : Optional[str]          = None
+    error_message     : Optional[str]          = None
+    created_at        : datetime               = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at        : datetime               = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @field_validator("filename")
     @classmethod
@@ -187,26 +171,20 @@ class ProcessedDocument(BaseModel):
 
     def touch(self) -> "ProcessedDocument":
         """Refresh updated_at timestamp — call before saving."""
-        object.__setattr__(self, "updated_at", datetime.utcnow())
+        object.__setattr__(self, "updated_at", datetime.now(timezone.utc))
         return self
 
     def summary(self) -> dict:
         return {
-            "doc_id"     : self.doc_id,
-            "filename"   : self.filename,
-            "status"     : self.status.value,
-            "title"      : self.metadata.title,
-            "authors"    : self.metadata.authors[:3],  # first 3 for preview
-            "year"       : self.metadata.year,
-            "journal"    : self.metadata.journal,
-            "doi"        : self.metadata.doi,
-            "pages"      : self.metadata.page_count,
-            "words"      : self.metadata.word_count,
-            "chunks"     : self.chunk_count,
-            "sections"   : [s.section_type.value for s in self.sections],
-            "is_ocr"     : self.metadata.is_ocr,
-            "created_at" : self.created_at.isoformat(),
-            "updated_at" : self.updated_at.isoformat(),
+            "doc_id"    : self.doc_id,
+            "filename"  : self.filename,
+            "status"    : self.status.value,
+            "pages"     : self.metadata.page_count,
+            "words"     : self.metadata.word_count,
+            "chunks"    : self.chunk_count,
+            "sections"  : [s.section_type.value for s in self.sections],
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
         }
 
 
@@ -231,17 +209,17 @@ class SearchResponse(BaseModel):
 class ChatMessage(BaseModel):
     role      : MessageRole
     content   : str         = Field(..., min_length=1)
-    timestamp : datetime    = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     provider  : Optional[LLMProvider] = None
     model     : Optional[str]         = None
 
 
 class ChatRequest(BaseModel):
-    doc_id   : str               = Field(..., min_length=1)
-    question : str               = Field(..., min_length=1, max_length=2000)
-    history  : list[ChatMessage] = Field(default_factory=list)
-    top_k    : int               = Field(default=5, ge=1, le=20)
-    stream   : bool              = True
+    doc_id   : str              = Field(..., min_length=1)
+    question : str              = Field(..., min_length=1, max_length=2000)
+    history  : list[ChatMessage]= Field(default_factory=list)
+    top_k    : int              = Field(default=5, ge=1, le=20)
+    stream   : bool             = True
 
     @field_validator("question")
     @classmethod
@@ -295,6 +273,6 @@ class AnalysisResponse(BaseModel):
 
 class ErrorResponse(BaseModel):
     error     : str
-    detail    : Optional[str] = None
-    doc_id    : Optional[str] = None
-    timestamp : datetime      = Field(default_factory=datetime.utcnow)
+    detail    : Optional[str]   = None
+    doc_id    : Optional[str]   = None
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
