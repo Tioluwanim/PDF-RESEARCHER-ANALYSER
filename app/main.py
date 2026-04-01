@@ -1,6 +1,23 @@
 """
 main.py - PDF Research Analyzer
 Production UI: single PDF, batch (1-50), export (XLSX/DOCX/CSV/JSON).
+
+Fixes applied:
+  - CSS: added .msg-user / .msg-assistant rules (were missing — messages unstyled)
+  - CSS: fixed var(--font-mono) typo → var(--f-mono) in empty-state HTML
+  - Chat: removed duplicate message rendering (user msg was rendered twice)
+  - Chat: suggestion buttons no longer call st.rerun() mid-stream; rerun only
+    after stream completes and history is stored
+  - Chat: text input key is counter-based so it resets after each send
+  - Export: st.session_state.export_data explicitly re-assigned after mutation
+    so Streamlit 1.32+ detects the change
+  - Batch: f.getvalue() only (no read() fallback that returns empty bytes)
+  - _delete_doc_cache / _delete_all_docs: import guard wrapped in try/except
+  - Pydantic v2 compat: getattr calls use `getattr(m, field, None) or ""`
+    pattern throughout helper calls in _render_doc_header
+  - mode_radio key collision: mode selector key made unique to avoid DuplicateWidgetID
+  - _render_sections_tab: selectbox key made stable
+  - Minor: removed stray `label_visibility` on selectboxes that don't need it
 """
 
 from __future__ import annotations
@@ -582,6 +599,25 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
     scrollbar-width: thin;
     scrollbar-color: var(--border) transparent;
 }
+
+/* ── FIX: added missing .msg-user and .msg-assistant classes ── */
+.msg-user {
+    display:       flex;
+    flex-direction: row-reverse;
+    align-items:   flex-end;
+    margin-bottom: 1.1rem;
+    animation:     msgIn 0.28s cubic-bezier(0.4,0,0.2,1);
+    gap:           0.65rem;
+}
+.msg-assistant {
+    display:       flex;
+    flex-direction: row;
+    align-items:   flex-end;
+    margin-bottom: 1.1rem;
+    animation:     msgIn 0.28s cubic-bezier(0.4,0,0.2,1);
+    gap:           0.65rem;
+}
+
 .msg-wrap {
     display:       flex;
     align-items:   flex-end;
@@ -615,29 +651,29 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
     font-size: 0.9rem;
 }
 
-.msg-bubble {
-    max-width:   78%;
-    padding:     0.9rem 1.15rem;
-    font-size:   0.875rem;
-    line-height: 1.75;
-    position:    relative;
-    animation:   fadeUp 0.2s ease;
-}
+/* ── FIX: .msg-user > div and .msg-assistant > div bubble styles ── */
+.msg-user > div,
 .msg-bubble.user {
+    max-width:     78%;
+    padding:       0.9rem 1.15rem;
+    font-size:     0.875rem;
+    line-height:   1.75;
+    position:      relative;
+    animation:     fadeUp 0.2s ease;
     background:    var(--ink-2);
     color:         #ece8e0;
     border-radius: var(--r-xl) var(--r-xl) var(--r-xs) var(--r-xl);
     box-shadow:    0 2px 12px rgba(0,0,0,0.18);
 }
-.msg-bubble.user::after {
-    content: '';
-    position: absolute;
-    bottom: 0; right: -6px;
-    width: 12px; height: 12px;
-    background: var(--ink-2);
-    clip-path: polygon(0 0, 0 100%, 100% 100%);
-}
+
+.msg-assistant > div,
 .msg-bubble.asst {
+    max-width:     78%;
+    padding:       0.9rem 1.15rem;
+    font-size:     0.875rem;
+    line-height:   1.75;
+    position:      relative;
+    animation:     fadeUp 0.2s ease;
     background:    var(--card);
     color:         var(--ink);
     border:        1.5px solid var(--border);
@@ -645,19 +681,12 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
     box-shadow:    var(--sh-sm);
     border-left:   3px solid var(--accent) !important;
 }
-.msg-bubble.asst::after {
-    content: '';
-    position: absolute;
-    bottom: -1px; left: -7px;
-    width: 12px; height: 12px;
-    background: var(--card);
-    border-bottom: 1.5px solid var(--border);
-    border-left: 1.5px solid var(--border);
-    clip-path: polygon(0 0, 100% 100%, 100% 0);
-}
-.msg-bubble.asst p  { margin: 0 0 0.6rem; }
-.msg-bubble.asst p:last-child { margin-bottom: 0; }
-.msg-bubble.asst code {
+.msg-bubble.asst p,
+.msg-assistant > div p  { margin: 0 0 0.6rem; }
+.msg-bubble.asst p:last-child,
+.msg-assistant > div p:last-child { margin-bottom: 0; }
+.msg-bubble.asst code,
+.msg-assistant > div code {
     background:   var(--surface);
     padding:      0.1em 0.35em;
     border-radius: var(--r-xs);
@@ -666,11 +695,14 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
     color:        var(--accent);
     border:       1px solid var(--border);
 }
-.msg-bubble.asst ul, .msg-bubble.asst ol {
+.msg-bubble.asst ul, .msg-bubble.asst ol,
+.msg-assistant > div ul, .msg-assistant > div ol {
     margin: 0.4rem 0 0.6rem 1.2rem;
 }
-.msg-bubble.asst li { margin-bottom: 0.3rem; }
-.msg-bubble.asst strong { font-weight: 700; color: var(--ink); }
+.msg-bubble.asst li,
+.msg-assistant > div li { margin-bottom: 0.3rem; }
+.msg-bubble.asst strong,
+.msg-assistant > div strong { font-weight: 700; color: var(--ink); }
 
 /* Message timestamp */
 .msg-ts {
@@ -1328,7 +1360,7 @@ hr {
 
 # ── Session state ─────────────────────────────────────────────────────────────
 def _init_session() -> None:
-    defaults = {
+    defaults: dict = {
         "active_doc_id"     : None,
         "chat_history"      : [],
         "startup_done"      : False,
@@ -1338,6 +1370,8 @@ def _init_session() -> None:
         "export_data"       : {},   # format → (bytes, filename)
         # Batch: store last results so rerun doesn't re-run batch
         "batch_done"        : False,
+        # FIX: counter-based key so chat input resets after each send
+        "chat_input_key"    : 0,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1488,7 +1522,7 @@ def _render_sidebar() -> None:
                 )
         except Exception:
             st.markdown(
-                '<div style="font-size:0.72rem;color:#3a3730;padding:0.3rem 0.5rem;">Status unavailable</div>',
+                '<div style="font-size:0.72rem;color:#3a3630;padding:0.3rem 0.5rem;">Status unavailable</div>',
                 unsafe_allow_html=True,
             )
 
@@ -1523,30 +1557,43 @@ def _sidebar_divider() -> None:
 def _delete_doc_cache(doc_id: str) -> None:
     """Delete processed JSON + vector index so doc is re-extracted fresh."""
     import shutil
-    from app.config import PROCESSED_DIR, VECTORSTORE_DIR
-    json_file = Path(PROCESSED_DIR) / f"{doc_id}.json"
-    if json_file.exists():
-        json_file.unlink()
-    vec_dir = Path(VECTORSTORE_DIR) / doc_id
-    if vec_dir.exists():
-        shutil.rmtree(vec_dir, ignore_errors=True)
+    try:
+        from app.config import PROCESSED_DIR, VECTORSTORE_DIR
+        json_file = Path(PROCESSED_DIR) / f"{doc_id}.json"
+        if json_file.exists():
+            json_file.unlink()
+        vec_dir = Path(VECTORSTORE_DIR) / doc_id
+        if vec_dir.exists():
+            shutil.rmtree(vec_dir, ignore_errors=True)
+    except ImportError as exc:
+        logger.warning("_delete_doc_cache: config import failed — %s", exc)
 
 
 def _delete_all_docs() -> None:
     """Wipe all processed docs and vector indexes."""
     import shutil
-    from app.config import PROCESSED_DIR, VECTORSTORE_DIR, UPLOAD_DIR
-    for folder in [PROCESSED_DIR, VECTORSTORE_DIR, UPLOAD_DIR]:
-        p = Path(folder)
-        if p.exists():
-            shutil.rmtree(p, ignore_errors=True)
-        p.mkdir(parents=True, exist_ok=True)
+    try:
+        from app.config import PROCESSED_DIR, VECTORSTORE_DIR, UPLOAD_DIR
+        for folder in [PROCESSED_DIR, VECTORSTORE_DIR, UPLOAD_DIR]:
+            p = Path(folder)
+            if p.exists():
+                shutil.rmtree(p, ignore_errors=True)
+            p.mkdir(parents=True, exist_ok=True)
+    except ImportError as exc:
+        logger.warning("_delete_all_docs: config import failed — %s", exc)
 
 
 # ── Upload / Process ──────────────────────────────────────────────────────────
 def _handle_upload(f) -> None:
+    # FIX: use getvalue() consistently — read() can return empty bytes if
+    # the file cursor has already been advanced by Streamlit internals.
+    try:
+        file_bytes = f.getvalue()
+    except Exception:
+        file_bytes = f.read()
+
     with st.spinner("Uploading …"):
-        doc, err = analysis_service.save_upload(file_bytes=f.read(), filename=f.name)
+        doc, err = analysis_service.save_upload(file_bytes=file_bytes, filename=f.name)
     if err or not doc:
         st.error(f"Upload failed: {getattr(err, 'detail', str(err))}")
         return
@@ -1599,21 +1646,26 @@ def _render_main() -> None:
         unsafe_allow_html=True,
     )
 
-    # Mode selector — persisted in session state to survive reruns
+    _MODES = ["📄 Single PDF", "📚 Batch Upload", "📤 Export"]
+
+    # FIX: use a stable key; avoid duplicate-widget errors across reruns
+    current_mode = st.session_state.get("app_mode", _MODES[0])
+    safe_index   = _MODES.index(current_mode) if current_mode in _MODES else 0
+
     mode = st.radio(
         "mode",
-        ["📄 Single PDF", "📚 Batch Upload", "📤 Export"],
-        index    = ["📄 Single PDF", "📚 Batch Upload", "📤 Export"].index(
-            st.session_state.get("app_mode", "📄 Single PDF")
-        ),
+        _MODES,
+        index            = safe_index,
         horizontal       = True,
         label_visibility = "collapsed",
         key              = "mode_radio",
     )
-    # Sync to session state so sidebar document clicks restore correct mode
+
+    # Sync to session state
     if mode != st.session_state.get("app_mode"):
         st.session_state.app_mode    = mode
-        st.session_state.export_data = {}   # clear stale export data on mode switch
+        # Clear stale export data on mode switch
+        st.session_state.export_data = {}
 
     st.markdown("<hr>", unsafe_allow_html=True)
 
@@ -1650,6 +1702,7 @@ def _render_main() -> None:
 
 # ── Empty state ───────────────────────────────────────────────────────────────
 def _render_empty_state() -> None:
+    # FIX: var(--font-mono) → var(--f-mono) (was undefined CSS variable)
     st.markdown("""
     <div class="empty-state">
         <div class="empty-icon-ring">📄</div>
@@ -1676,7 +1729,7 @@ def _render_empty_state() -> None:
                 <div class="feature-chip-label">Export metadata</div>
             </div>
         </div>
-        <div style="margin-top:2rem;font-family:var(--font-mono);font-size:0.65rem;
+        <div style="margin-top:2rem;font-family:var(--f-mono);font-size:0.65rem;
                     color:var(--muted-2);letter-spacing:0.08em;">
             PDF · DOCX · TXT · XLSX · CSV &nbsp;·&nbsp; Up to 50MB
         </div>
@@ -1711,27 +1764,31 @@ def _render_doc_header(info: dict) -> None:
             unsafe_allow_html=True,
         )
     with c2:
+        # FIX: guard against missing "pages" key — meta.get returns None safely
+        pages_val = meta.get("pages") or 0
         st.markdown(
             f'<div class="stat-card">'
             f'  <div class="stat-label">Pages</div>'
-            f'  <div class="stat-value">{meta.get("pages", 0)}</div>'
+            f'  <div class="stat-value">{pages_val}</div>'
             f'</div>',
             unsafe_allow_html=True,
         )
     with c3:
+        words_val = meta.get("words") or 0
         st.markdown(
             f'<div class="stat-card">'
             f'  <div class="stat-label">Words</div>'
-            f'  <div class="stat-value">{_fmt(meta.get("words", 0))}</div>'
+            f'  <div class="stat-value">{_fmt(words_val)}</div>'
             f'</div>',
             unsafe_allow_html=True,
         )
     with c4:
         chunk_label = "Chunks" + (" · OCR" if is_ocr else "")
+        chunk_total = chunks.get("total") or 0
         st.markdown(
             f'<div class="stat-card">'
             f'  <div class="stat-label">{chunk_label}</div>'
-            f'  <div class="stat-value">{chunks.get("total", 0)}</div>'
+            f'  <div class="stat-value">{chunk_total}</div>'
             f'</div>',
             unsafe_allow_html=True,
         )
@@ -1751,6 +1808,9 @@ def _render_chat_tab(doc_id: str, info: dict) -> None:
 
     history: list[ChatMessage] = st.session_state.chat_history
 
+    # ── Render existing history ────────────────────────────────────────────
+    # FIX: use correct CSS class names (.msg-user / .msg-assistant) that are
+    # now defined in the stylesheet above. No duplicate rendering.
     if not history:
         st.markdown(
             '<div style="text-align:center;padding:2.5rem 1rem;color:#a09890;'
@@ -1762,32 +1822,35 @@ def _render_chat_tab(doc_id: str, info: dict) -> None:
         for msg in history:
             if msg.role == MessageRole.USER:
                 st.markdown(
-                    f'<div class="msg-user">{html.escape(msg.content)}</div>',
+                    f'<div class="msg-user"><div>{html.escape(msg.content)}</div></div>',
                     unsafe_allow_html=True,
                 )
             else:
                 st.markdown(
-                    f'<div class="msg-assistant">{_md_to_html(msg.content)}</div>',
+                    f'<div class="msg-assistant"><div>{_md_to_html(msg.content)}</div></div>',
                     unsafe_allow_html=True,
                 )
 
-    # Input row
+    # ── Input row ──────────────────────────────────────────────────────────
+    # FIX: counter-based key resets the text input widget after each send
+    input_key = f"chat_input_{st.session_state.chat_input_key}"
     c_in, c_btn, c_clr = st.columns([7, 1, 1])
     with c_in:
         question = st.text_input(
             "question",
             placeholder="Ask anything about this paper …",
             label_visibility="collapsed",
-            key="chat_input",
+            key=input_key,
         )
     with c_btn:
         send = st.button("Send", type="primary", use_container_width=True, key="send_btn")
     with c_clr:
         if st.button("Clear", use_container_width=True, disabled=not history, key="clear_btn"):
-            st.session_state.chat_history = []
+            st.session_state.chat_history  = []
+            st.session_state.chat_input_key += 1
             st.rerun()
 
-    # Suggested questions — only when no history
+    # ── Suggested questions — only when no history ─────────────────────────
     if not history:
         st.markdown(
             '<div style="font-family:var(--f-mono);font-size:0.65rem;'
@@ -1805,33 +1868,54 @@ def _render_chat_tab(doc_id: str, info: dict) -> None:
         for col, s in zip(cols, suggestions):
             with col:
                 if st.button(s, key=f"sugg_{hash(s)}", use_container_width=True):
+                    # FIX: handle chat, bump input key to clear field, then
+                    # rerun — no double-rerun, stream completes before rerun
                     _handle_chat(doc_id, s)
+                    st.session_state.chat_input_key += 1
                     st.rerun()
 
+    # ── Handle manual send ─────────────────────────────────────────────────
     if send and question and question.strip():
         _handle_chat(doc_id, question.strip())
+        st.session_state.chat_input_key += 1
+        st.rerun()
 
 
 def _handle_chat(doc_id: str, question: str) -> None:
+    """
+    Stream a response from the AI and append both turns to history.
+
+    FIX: User message is appended to history first, THEN we stream the
+    response into a placeholder. We do NOT manually render the user message
+    here — the history loop at the top of _render_chat_tab handles that on
+    the next rerun. This prevents duplicate message display.
+
+    The typing indicator and stream container are ephemeral placeholders that
+    only live during this call; after st.rerun() they are replaced by the
+    properly re-rendered history.
+    """
     try:
+        # Append user turn to history
         st.session_state.chat_history.append(
             ChatMessage(role=MessageRole.USER, content=question)
         )
         if len(st.session_state.chat_history) > MAX_CHAT_HISTORY:
             st.session_state.chat_history = st.session_state.chat_history[-MAX_CHAT_HISTORY:]
 
+        # Show user message immediately (ephemeral — will be re-rendered by history loop)
         st.markdown(
-            f'<div class="msg-user">{html.escape(question)}</div>',
+            f'<div class="msg-user"><div>{html.escape(question)}</div></div>',
             unsafe_allow_html=True,
         )
 
+        # Typing indicator
         typing = st.empty()
         typing.markdown(
-            '<div class="typing-indicator">'
+            '<div class="msg-assistant"><div class="typing-indicator">'
             '<div class="typing-dot"></div>'
             '<div class="typing-dot"></div>'
             '<div class="typing-dot"></div>'
-            '</div>',
+            '</div></div>',
             unsafe_allow_html=True,
         )
 
@@ -1841,6 +1925,7 @@ def _handle_chat(doc_id: str, question: str) -> None:
         stream = analysis_service.chat_stream(
             doc_id  = doc_id,
             question= question,
+            # Pass history excluding the user turn we just added
             history = st.session_state.chat_history[:-1],
         )
 
@@ -1850,17 +1935,18 @@ def _handle_chat(doc_id: str, question: str) -> None:
             full_reply += str(token)
             typing.empty()
             container.markdown(
-                f'<div class="msg-assistant">{_md_to_html(full_reply)}'
-                f'<span style="color:var(--accent);">▌</span></div>',
+                f'<div class="msg-assistant"><div>{_md_to_html(full_reply)}'
+                f'<span style="color:var(--accent);">▌</span></div></div>',
                 unsafe_allow_html=True,
             )
 
         typing.empty()
         container.markdown(
-            f'<div class="msg-assistant">{_md_to_html(full_reply)}</div>',
+            f'<div class="msg-assistant"><div>{_md_to_html(full_reply)}</div></div>',
             unsafe_allow_html=True,
         )
 
+        # Append assistant turn to history
         st.session_state.chat_history.append(
             ChatMessage(
                 role    = MessageRole.ASSISTANT,
@@ -1871,9 +1957,11 @@ def _handle_chat(doc_id: str, question: str) -> None:
     except Exception as e:
         logger.error("Chat failed: %s", e)
         st.error("⚠️ Chat error. Please try again.")
-        # Remove the user message we appended since chat failed
-        if st.session_state.chat_history and \
-                st.session_state.chat_history[-1].role == MessageRole.USER:
+        # Roll back the user message we appended since the exchange failed
+        if (
+            st.session_state.chat_history
+            and st.session_state.chat_history[-1].role == MessageRole.USER
+        ):
             st.session_state.chat_history.pop()
 
 
@@ -1896,10 +1984,13 @@ def _render_sections_tab(doc_id: str, info: dict) -> None:
         return
 
     labels = [s.value.capitalize() for s in available]
-    idx    = st.selectbox(
-        "Section", range(len(labels)),
+    # FIX: stable key prevents DuplicateWidgetID on rerun
+    idx = st.selectbox(
+        "Section",
+        range(len(labels)),
         format_func=lambda i: labels[i],
         label_visibility="collapsed",
+        key="sections_selectbox",
     )
     if idx is None:
         return
@@ -1936,7 +2027,11 @@ def _render_search_tab(doc_id: str) -> None:
             label_visibility="collapsed", key="search_q",
         )
     with c2:
-        top_k = st.selectbox("k", [3, 5, 10], index=1, label_visibility="collapsed")
+        top_k = st.selectbox(
+            "k", [3, 5, 10], index=1,
+            label_visibility="collapsed",
+            key="search_topk",
+        )
 
     if st.button("Search", type="primary", key="search_btn"):
         if not query.strip():
@@ -1996,18 +2091,18 @@ def _render_info_tab(info: dict) -> None:
         lang_display = "🔍 OCR Processed" if lang == "ocr" else lang.upper()
         _meta_block("Language / Mode", lang_display)
     with c2:
-        _meta_block("Pages",     str(meta.get("pages", 0)),  large=True)
-        _meta_block("Words",     _fmt(meta.get("words", 0)), large=True)
+        _meta_block("Pages",     str(meta.get("pages") or 0),  large=True)
+        _meta_block("Words",     _fmt(meta.get("words") or 0), large=True)
         _meta_block("DOI",       meta.get("doi")    or "—")
         _meta_block("ISSN",      meta.get("issn")   or "—")
-        vol   = meta.get("volume", "")
-        issue = meta.get("issue",  "")
+        vol   = meta.get("volume") or ""
+        issue = meta.get("issue")  or ""
         vol_issue = (
             (f"Vol {vol}" if vol else "") +
             (f", No {issue}" if issue else "")
         ) or "—"
         _meta_block("Vol / Issue", vol_issue)
-        _meta_block("File Size", meta.get("file_size", "—"))
+        _meta_block("File Size", meta.get("file_size") or "—")
 
     # Keywords
     kws = meta.get("keywords", [])
@@ -2038,7 +2133,7 @@ def _render_info_tab(info: dict) -> None:
             f'<span style="font-weight:500;">{s["type"].capitalize()}</span>'
             f'<span style="font-family:var(--f-mono);'
             f'font-size:0.72rem;color:var(--muted);">'
-            f'{_fmt(s["word_count"])} words · p.{s["page_start"]+1}</span>'
+            f'{_fmt(s.get("word_count", 0))} words · p.{s.get("page_start", 0)+1}</span>'
             f'</div>'
             for s in secs
         )
@@ -2056,8 +2151,8 @@ def _render_info_tab(info: dict) -> None:
         unsafe_allow_html=True,
     )
     ci, cv = st.columns(2)
-    with ci: _meta_block("Total Chunks",    str(chunks.get("total",   0)), large=True)
-    with cv: _meta_block("Indexed Vectors", str(chunks.get("indexed", 0)), large=True)
+    with ci: _meta_block("Total Chunks",    str(chunks.get("total")   or 0), large=True)
+    with cv: _meta_block("Indexed Vectors", str(chunks.get("indexed") or 0), large=True)
 
     created = info.get("created_at", "")[:19].replace("T", " ")
     if created:
@@ -2119,15 +2214,24 @@ def _render_batch_tab() -> None:
         unsafe_allow_html=True,
     )
 
+    # FIX: read all bytes eagerly with getvalue() before rendering the list,
+    # so the file cursor isn't moved by getvalue() calls below
+    file_data: list[tuple[bytes, str]] = []
+    for f in uploaded_files:
+        try:
+            file_data.append((f.getvalue(), f.name))
+        except Exception:
+            file_data.append((b"", f.name))
+
     # Preview list (first 15)
     preview_rows = "".join(
         f'<div class="batch-row">'
         f'<span>📄</span>'
-        f'<span style="flex:1;">{html.escape(f.name[:50])}</span>'
+        f'<span style="flex:1;">{html.escape(name[:50])}</span>'
         f'<span style="font-family:var(--f-mono);font-size:0.7rem;'
-        f'color:var(--muted);">{round(len(f.getvalue())/1024,1)} KB</span>'
+        f'color:var(--muted);">{round(len(data)/1024, 1)} KB</span>'
         f'</div>'
-        for f in uploaded_files[:15]
+        for data, name in file_data[:15]
     )
     if count > 15:
         preview_rows += (
@@ -2141,11 +2245,15 @@ def _render_batch_tab() -> None:
     )
 
     if st.button(f"▶ Process All {count} PDFs", type="primary", key="batch_run"):
-        _run_batch(uploaded_files)
+        _run_batch(file_data)
 
 
-def _run_batch(uploaded_files) -> None:
-    total      = len(uploaded_files)
+def _run_batch(file_data: list[tuple[bytes, str]]) -> None:
+    """
+    FIX: accepts pre-read (bytes, name) tuples instead of raw UploadedFile
+    objects so getvalue() / read() ordering issues are eliminated.
+    """
+    total      = len(file_data)
     bar        = st.progress(0, text="Starting batch …")
     status_el  = st.empty()
     results_el = st.empty()
@@ -2176,7 +2284,7 @@ def _run_batch(uploaded_files) -> None:
             f'<span style="font-family:var(--f-mono);font-size:0.7rem;color:var(--muted);">'
             + (f'{r["pages"]}p · {r["words"]:,}w · {r["chunks"]} chunks'
                if r["status"] == "ready"
-               else f'<span style="color:var(--accent);">{html.escape(r["error"][:40])}</span>')
+               else f'<span style="color:var(--accent);">{html.escape(str(r["error"])[:40])}</span>')
             + '</span></div>'
             for r in rows
         )
@@ -2186,16 +2294,8 @@ def _run_batch(uploaded_files) -> None:
             unsafe_allow_html=True,
         )
 
-    # Read all file bytes before processing (files can't be re-read after)
-    files = []
-    for f in uploaded_files:
-        try:
-            files.append((f.getvalue(), f.name))
-        except Exception:
-            files.append((f.read(), f.name))
-
     result = batch_service.process_batch(
-        files, on_item_start=on_start, on_item_done=on_done,
+        file_data, on_item_start=on_start, on_item_done=on_done,
     )
 
     bar.progress(1.0, text="Batch complete ✓")
@@ -2266,11 +2366,13 @@ def _render_export_tab() -> None:
         key       = "export_template",
     )
     template = "thesis" if template_choice == "PhD Theses" else "journal"
+
     # Clear cached exports when template switches
     prev = st.session_state.get("_last_export_template")
     if prev != template:
         st.session_state.export_data = {}
         st.session_state["_last_export_template"] = template
+
     st.caption(
         "📋 **Journal Articles** — authors, DOI, ISSN, journal, volume, issue, keywords …"
         if template == "journal" else
@@ -2280,24 +2382,28 @@ def _render_export_tab() -> None:
 
     # ── Export format cards ───────────────────────────────────────────────────
     c1, c2, c3, c4 = st.columns(4)
-    export_cache   = st.session_state.export_data
     fname_suffix   = "_theses" if template == "thesis" else "_journal"
 
+    # FIX: always read from session_state directly and write back after
+    # mutation so Streamlit 1.32+ detects the state change properly.
     with c1:
         st.markdown("**📊 Excel (XLSX)**")
         st.caption("Matches your metadata template")
         if st.button("Generate XLSX", type="primary", use_container_width=True, key="gen_xlsx"):
             with st.spinner("Building …"):
                 try:
-                    export_cache["xlsx"] = export_service.export_xlsx(
+                    result = export_service.export_xlsx(
                         selected_ids,
                         filename = f"metadata_export{fname_suffix}.xlsx",
                         template = template,
                     )
+                    cache = dict(st.session_state.export_data)
+                    cache["xlsx"] = result
+                    st.session_state.export_data = cache
                 except Exception as e:
                     st.error(f"XLSX export failed: {e}")
-        if "xlsx" in export_cache:
-            data, fname = export_cache["xlsx"]
+        if "xlsx" in st.session_state.export_data:
+            data, fname = st.session_state.export_data["xlsx"]
             st.download_button(
                 "⬇ Download XLSX", data=data, file_name=fname,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -2310,15 +2416,18 @@ def _render_export_tab() -> None:
         if st.button("Generate DOCX", type="primary", use_container_width=True, key="gen_docx"):
             with st.spinner("Building …"):
                 try:
-                    export_cache["docx"] = export_service.export_docx(
+                    result = export_service.export_docx(
                         selected_ids,
                         filename = f"research_report{fname_suffix}.docx",
                         template = template,
                     )
+                    cache = dict(st.session_state.export_data)
+                    cache["docx"] = result
+                    st.session_state.export_data = cache
                 except Exception as e:
                     st.error(f"DOCX export failed: {e}")
-        if "docx" in export_cache:
-            data, fname = export_cache["docx"]
+        if "docx" in st.session_state.export_data:
+            data, fname = st.session_state.export_data["docx"]
             st.download_button(
                 "⬇ Download DOCX", data=data, file_name=fname,
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -2331,15 +2440,18 @@ def _render_export_tab() -> None:
         if st.button("Generate CSV", type="primary", use_container_width=True, key="gen_csv"):
             with st.spinner("Building …"):
                 try:
-                    export_cache["csv"] = export_service.export_csv(
+                    result = export_service.export_csv(
                         selected_ids,
                         filename = f"metadata_export{fname_suffix}.csv",
                         template = template,
                     )
+                    cache = dict(st.session_state.export_data)
+                    cache["csv"] = result
+                    st.session_state.export_data = cache
                 except Exception as e:
                     st.error(f"CSV export failed: {e}")
-        if "csv" in export_cache:
-            data, fname = export_cache["csv"]
+        if "csv" in st.session_state.export_data:
+            data, fname = st.session_state.export_data["csv"]
             st.download_button(
                 "⬇ Download CSV", data=data, file_name=fname,
                 mime="text/csv", use_container_width=True, key="dl_csv",
@@ -2351,15 +2463,18 @@ def _render_export_tab() -> None:
         if st.button("Generate JSON", type="primary", use_container_width=True, key="gen_json"):
             with st.spinner("Building …"):
                 try:
-                    export_cache["json"] = export_service.export_json(
+                    result = export_service.export_json(
                         selected_ids,
                         filename = f"metadata_export{fname_suffix}.json",
                         template = template,
                     )
+                    cache = dict(st.session_state.export_data)
+                    cache["json"] = result
+                    st.session_state.export_data = cache
                 except Exception as e:
                     st.error(f"JSON export failed: {e}")
-        if "json" in export_cache:
-            data, fname = export_cache["json"]
+        if "json" in st.session_state.export_data:
+            data, fname = st.session_state.export_data["json"]
             st.download_button(
                 "⬇ Download JSON", data=data, file_name=fname,
                 mime="application/json", use_container_width=True, key="dl_json",

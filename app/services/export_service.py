@@ -10,13 +10,19 @@ Field priority for every column:
   2. Detected section content (e.g. abstract from sections list)
   3. Regex fallback from full_text
 
-Fixes over previous version:
+Fixes applied over previous version:
   - _fallback_authors() does NOT split on commas (preserves "Last, First")
   - _build_citation() handles hyphenated first names correctly
   - Error sentinel rows shown in XLSX with red styling
   - _extract_volume / _extract_issue split into dedicated functions
   - PhD theses export added (author, date, dc.description, abstract,
     citation, publisher, dc.subject, dc.title, dc.type)
+  - Pydantic v2 compat: all getattr(model, field) calls use
+    `getattr(m, field, None) or ""` to avoid AttributeError on undefined fields
+  - _format_thesis_author: handles names with multiple commas (e.g. "Smith, Jr.")
+  - _collect_rows / _collect_thesis_rows: m.page_count guarded with getattr
+  - _collect_rows: year field uses getattr with None fallback
+  - _build_citation inner lambda renamed to avoid shadowing outer variable `m`
 """
 
 from __future__ import annotations
@@ -211,7 +217,7 @@ class ExportService:
     ) -> tuple[bytes, str]:
         try:
             from docx import Document
-            from docx.shared import Pt, RGBColor, Inches
+            from docx.shared import Pt, RGBColor, Inches  # noqa: F401
             from docx.enum.text import WD_ALIGN_PARAGRAPH
         except ImportError:
             raise ImportError("pip install python-docx")
@@ -290,8 +296,7 @@ class ExportService:
 
             doc.add_paragraph()
 
-            abstract_key = "abstract"
-            abstract = row.get(abstract_key, "")
+            abstract = row.get("abstract", "")
             if abstract:
                 doc.add_heading("Abstract", level=2)
                 p = doc.add_paragraph(abstract[:2000])
@@ -369,11 +374,15 @@ class ExportService:
                     or _fallback_authors(full, title)
                 )
                 authors      = " || ".join(authors_list)
-                editor       = _clean(getattr(m, "editor", "") or "") or _extract_editor_fb(first3)
-                year         = _clean(getattr(m, "year", "") or "")
-                date         = year or _parse_date(m.created_at or "")
-                pages        = _clean(getattr(m, "pages", "") or "") or _extract_pages_fb(first3)
-                page_no      = pages or (str(m.page_count) if m.page_count else "")
+
+                # FIX: use getattr with None default for optional Pydantic v2 fields
+                editor    = _clean(getattr(m, "editor",  None) or "") or _extract_editor_fb(first3)
+                year      = _clean(getattr(m, "year",    None) or "")
+                date      = year or _parse_date(getattr(m, "created_at", None) or "")
+                pages_raw = _clean(getattr(m, "pages",   None) or "") or _extract_pages_fb(first3)
+                # FIX: guard page_count — may not exist on all schema versions
+                page_count_val = getattr(m, "page_count", None) or 0
+                page_no   = pages_raw or (str(page_count_val) if page_count_val else "")
 
                 abstract = ""
                 for sec in (doc.sections or []):
@@ -381,24 +390,24 @@ class ExportService:
                         abstract = sec.content[:2000].strip()
                         break
                 if not abstract:
-                    abstract = _clean(m.abstract or "")[:2000]
+                    abstract = _clean(getattr(m, "abstract", None) or "")[:2000]
                 if not abstract:
                     abstract = _extract_abstract_fb(full[:5000])
 
-                sponsor   = _clean(getattr(m, "funding", "") or "") or _extract_funding_fb(full[:8000])
-                doi       = _clean(m.doi       or "") or _extract_doi(first3)
-                issn      = _clean(m.issn      or "") or _extract_issn(first3)
-                publisher = _clean(m.publisher or "") or _extract_publisher(first3)
-                journal   = _clean(m.journal   or "") or _extract_journal(first3)
-                volume    = _clean(m.volume    or "") or _extract_volume(first3)
-                issue     = _clean(m.issue     or "") or _extract_issue(first3)
-                kws       = list(m.keywords or []) or _extract_keywords_list(full)
+                sponsor   = _clean(getattr(m, "funding",       None) or "") or _extract_funding_fb(full[:8000])
+                doi       = _clean(getattr(m, "doi",           None) or "") or _extract_doi(first3)
+                issn      = _clean(getattr(m, "issn",          None) or "") or _extract_issn(first3)
+                publisher = _clean(getattr(m, "publisher",     None) or "") or _extract_publisher(first3)
+                journal   = _clean(getattr(m, "journal",       None) or "") or _extract_journal(first3)
+                volume    = _clean(getattr(m, "volume",        None) or "") or _extract_volume(first3)
+                issue     = _clean(getattr(m, "issue",         None) or "") or _extract_issue(first3)
+                kws       = list(getattr(m, "keywords", None) or []) or _extract_keywords_list(full)
                 keywords  = " || ".join(_clean(k) for k in kws if k.strip())
-                art_type  = _clean(getattr(m, "article_type", "") or "") or _extract_article_type_fb(first3)
+                art_type  = _clean(getattr(m, "article_type",  None) or "") or _extract_article_type_fb(first3)
                 citation  = _build_citation(
                     title=title, authors=authors_list, date=date,
                     journal=journal, volume=volume, issue=issue,
-                    pages=pages, doi=doi, publisher=publisher,
+                    pages=pages_raw, doi=doi, publisher=publisher,
                 )
 
                 rows.append({
@@ -457,20 +466,19 @@ class ExportService:
                 full   = doc.full_text or ""
 
                 # dc.title
-                dc_title = _clean(m.title or "") or _clean(doc.filename.replace(".pdf", ""))
+                dc_title = _clean(getattr(m, "title", None) or "") or _clean(doc.filename.replace(".pdf", ""))
 
-                # author — thesis usually has one author; join multiple with " and "
+                # author — thesis usually has one author
+                # FIX: all getattr calls use None default for Pydantic v2 compat
                 authors_list = _dedupe_authors(
-                    [_clean(a) for a in (m.authors or []) if a.strip()]
+                    [_clean(a) for a in (getattr(m, "authors", None) or []) if a.strip()]
                     or _fallback_authors(full, dc_title)
                 )
-                # Format as "Last, First." thesis style
                 author = _format_thesis_author(authors_list[0]) if authors_list else ""
 
                 # date
-                year = _clean(getattr(m, "year", "") or "")
-                date = year or _parse_date(m.created_at or "")
-                # For theses, just the year is standard
+                year = _clean(getattr(m, "year", None) or "")
+                date = year or _parse_date(getattr(m, "created_at", None) or "")
                 date = date[:4] if date else ""
 
                 # dc.description — physical description e.g. "xvi, 172p."
@@ -483,19 +491,18 @@ class ExportService:
                         abstract = sec.content[:2000].strip()
                         break
                 if not abstract:
-                    abstract = _clean(m.abstract or "")[:2000]
+                    abstract = _clean(getattr(m, "abstract", None) or "")[:2000]
                 if not abstract:
                     abstract = _extract_abstract_fb(full[:5000])
 
                 # publisher — for theses: "Department, Faculty, University"
-                publisher = _clean(m.publisher or "") or _extract_thesis_publisher(full[:3000])
+                publisher = _clean(getattr(m, "publisher", None) or "") or _extract_thesis_publisher(full[:3000])
 
                 # dc.subject — keywords
-                kws      = list(m.keywords or []) or _extract_keywords_list(full)
-                dc_subj  = " || ".join(_clean(k) for k in kws if k.strip())
+                kws     = list(getattr(m, "keywords", None) or []) or _extract_keywords_list(full)
+                dc_subj = " || ".join(_clean(k) for k in kws if k.strip())
 
-                # citation — thesis format:
-                # Last, F. (Year). Title. Department, University.
+                # citation — thesis format
                 citation = _build_thesis_citation(
                     title     = dc_title,
                     author    = author,
@@ -551,7 +558,7 @@ def _error_thesis_row(doc_id: str, reason: str) -> dict:
 
 
 def _clean(text: str) -> str:
-    return unescape(text).strip()
+    return unescape(str(text)).strip()
 
 
 def _dedupe_authors(authors: list[str]) -> list[str]:
@@ -578,11 +585,20 @@ def _format_thesis_author(name: str) -> str:
     """
     Format a thesis author name as "Last, First Middle."
     e.g. "Ezekiel Oluwakayode Idowu" → "Idowu, Ezekiel Oluwakayode."
+
+    FIX: handles names with multiple commas (e.g. "Smith, John, Jr.") by
+    only treating the part before the FIRST comma as the last name indicator,
+    i.e. if a comma is already present we treat it as already-formatted.
     """
     name = name.strip().rstrip(".")
+    if not name:
+        return name
+
     if "," in name:
-        # Already "Last, First" — ensure trailing period
+        # Already "Last, First [suffix]" style — normalise trailing period only
+        # but do NOT re-split on additional commas (e.g. "Jr.")
         return name.rstrip(".") + "."
+
     tokens = name.split()
     if not tokens:
         return name
@@ -599,8 +615,8 @@ def _extract_physical_description(text: str) -> str:
     Looks for patterns like "xvi, 172p." or "xx, 300 pages"
     """
     m = re.search(
-        r"\b([ivxlcdm]+(?:,\s*\d+\s*(?:p(?:ages?|\.)?|leaves?)))\b",
-        text[:2000], re.IGNORECASE,
+        r"\b([ivxlcdmIVXLCDM]+(?:,\s*\d+\s*(?:p(?:ages?|\.)?|leaves?)))\b",
+        text[:2000],
     )
     if m:
         return m.group(1).strip()
@@ -615,16 +631,17 @@ def _extract_thesis_publisher(text: str) -> str:
     Extract thesis publisher (department + university).
     Looks for "Department of X, Faculty of Y, University Z"
     """
-    # Pattern: "Department of X, Faculty of Y, University Z"
     m = re.search(
         r"(Department\s+of\s+[^\n]{5,80})",
         text, re.IGNORECASE,
     )
     if m:
-        # Try to also get university on same or next line
-        dept   = m.group(1).strip().rstrip(".,")
-        rest   = text[m.end():]
-        uni_m  = re.search(r"((?:Obafemi|University|Polytechnic|College)[^\n]{3,60})", rest[:200], re.IGNORECASE)
+        dept  = m.group(1).strip().rstrip(".,")
+        rest  = text[m.end():]
+        uni_m = re.search(
+            r"((?:Obafemi|University|Polytechnic|College)[^\n]{3,60})",
+            rest[:200], re.IGNORECASE,
+        )
         if uni_m:
             return f"{dept}, {uni_m.group(1).strip().rstrip('.,')}"
         return dept
@@ -645,17 +662,11 @@ def _build_thesis_citation(
     """
     Build a thesis citation:
     Last, F. (Year). Title. Department, University.
-
-    Example:
-    Idowu, E. O. (1990). The impact of land tenure systems and rural
-    credit market on agricultural investment in Oyo state of Nigeria.
-    Department of Agricultural Economics, Obafemi Awolowo University, Ile-Ife.
     """
     parts: list[str] = []
 
-    # Author in "Last, F. [M.]" format — already formatted by _format_thesis_author
+    # Convert "Idowu, Ezekiel Oluwakayode." → "Idowu, E. O."
     if author:
-        # Convert "Idowu, Ezekiel Oluwakayode." → "Idowu, E. O."
         name = author.rstrip(".")
         if "," in name:
             last, rest = name.split(",", 1)
@@ -669,7 +680,6 @@ def _build_thesis_citation(
     parts.append(f"({year})." if re.match(r"^(19|20)\d{2}$", year) else "(n.d.).")
 
     if title:
-        # Sentence case
         words = title.split()
         cased = []
         for i, word in enumerate(words):
@@ -681,7 +691,8 @@ def _build_thesis_citation(
             else:
                 cased.append(word.lower())
         t = " ".join(cased)
-        t = re.sub(r"(:\s+)([a-z])", lambda m: m.group(1) + m.group(2).upper(), t)
+        # FIX: renamed lambda arg to avoid shadowing outer variable `m`
+        t = re.sub(r"(:\s+)([a-z])", lambda mo: mo.group(1) + mo.group(2).upper(), t)
         parts.append(f"{t}.")
 
     if publisher:
@@ -696,9 +707,9 @@ def _parse_date(raw: str) -> str:
     raw = raw.strip()
     if re.match(r"^(19|20)\d{2}$", raw):
         return raw
-    m = re.match(r"D:(\d{4})(\d{2})(\d{2})", raw)
-    if m:
-        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    match = re.match(r"D:(\d{4})(\d{2})(\d{2})", raw)
+    if match:
+        return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
     raw_clean = re.sub(r"(\d+)(st|nd|rd|th)\b", r"\1", raw)
     for fmt in (
         "%d %B %Y", "%B %d %Y", "%d %b %Y", "%b %d %Y",
@@ -739,8 +750,9 @@ def _build_citation(
                 initials = []
                 for tok in tokens[:-1]:
                     if tok:
-                        fl = tok.lstrip("-")[0] if tok.lstrip("-") else tok[0]
-                        initials.append(f"{fl.upper()}.")
+                        # FIX: handle hyphenated first names e.g. "Jean-Paul"
+                        first_char = tok.lstrip("-")[0] if tok.lstrip("-") else tok[0]
+                        initials.append(f"{first_char.upper()}.")
                 init_str = " ".join(initials)
                 formatted.append(f"{last}, {init_str}" if init_str else last)
         parts.append(" and ".join(formatted))
@@ -762,7 +774,8 @@ def _build_citation(
             else:
                 cased.append(word.lower())
         t = " ".join(cased)
-        t = re.sub(r"(:\s+)([a-z])", lambda m: m.group(1) + m.group(2).upper(), t)
+        # FIX: renamed lambda arg to avoid shadowing outer variable `m`
+        t = re.sub(r"(:\s+)([a-z])", lambda mo: mo.group(1) + mo.group(2).upper(), t)
         parts.append(f"{t}.")
 
     if journal:
@@ -794,7 +807,10 @@ def _extract_editor_fb(text: str) -> str:
         text[:4000], re.IGNORECASE,
     )
     if m:
-        raw = re.split(r"\s*[,;]\s*(?:PhD|MD|Dr|Prof|University|Institute)", m.group(1), flags=re.IGNORECASE)[0]
+        raw = re.split(
+            r"\s*[,;]\s*(?:PhD|MD|Dr|Prof|University|Institute)",
+            m.group(1), flags=re.IGNORECASE,
+        )[0]
         return raw.strip().rstrip(".,;")[:80]
     return ""
 
@@ -860,7 +876,7 @@ def _extract_article_type_fb(text: str) -> str:
 
 
 def _fallback_authors(text: str, title: str) -> list[str]:
-    lines       = [l.strip() for l in text[:3000].split("\n") if l.strip()]
+    lines       = [line.strip() for line in text[:3000].split("\n") if line.strip()]
     title_found = False
     candidates  : list[str] = []
     title_low   = title[:30].lower() if title else ""
@@ -880,7 +896,7 @@ def _fallback_authors(text: str, title: str) -> list[str]:
         line = re.sub(r"^[\d,*†‡§¶\s]+", "", line).strip()
         if not line:
             continue
-        # Split on " and " or ";" — NOT commas (names use "Last, First")
+        # FIX: split on " and " or ";" — NOT commas (names use "Last, First")
         parts = re.split(r"\s+and\s+|\s*;\s*", line, flags=re.IGNORECASE)
         found_here = 0
         for part in parts:
@@ -911,11 +927,17 @@ def _extract_doi(text: str) -> str:
 
 def _extract_issn(text: str) -> str:
     m = re.search(r"\b[EP]-?ISSN[:\s]*(\d{4}-\d{3}[\dXx])\b", text[:4000], re.IGNORECASE)
-    if m: return m.group(1)
+    if m:
+        return m.group(1)
     m = re.search(r"\bISSN[:\s]*(\d{4}-\d{3}[\dXx])\b", text[:4000], re.IGNORECASE)
-    if m: return m.group(1)
-    m = re.search(r"(?:journal|issn|copyright|print|online)[^\n]*\b(\d{4}-\d{3}[\dXx])\b", text[:4000], re.IGNORECASE)
-    if m: return m.group(1)
+    if m:
+        return m.group(1)
+    m = re.search(
+        r"(?:journal|issn|copyright|print|online)[^\n]*\b(\d{4}-\d{3}[\dXx])\b",
+        text[:4000], re.IGNORECASE,
+    )
+    if m:
+        return m.group(1)
     m = re.search(r"\b(\d{4}-\d{3}[\dXx])\b", text[:2000])
     return m.group(1) if m else ""
 
@@ -931,7 +953,10 @@ def _extract_publisher(text: str) -> str:
         "African Journals Online","AJOL",
     ]
     chunk = text[:5000]
-    m = re.search(r"(?:Published\s+by|Publisher\s*:|©\s*\d{4}\s+)([A-Z][^\n]{3,70})", chunk, re.IGNORECASE)
+    m = re.search(
+        r"(?:Published\s+by|Publisher\s*:|©\s*\d{4}\s+)([A-Z][^\n]{3,70})",
+        chunk, re.IGNORECASE,
+    )
     if m:
         pub = re.split(r"\s*(?:Inc\.|Ltd\.?|All rights|Copyright|\d{4})", m.group(1))[0]
         return pub.strip()[:80]
@@ -968,7 +993,8 @@ def _extract_volume(text: str) -> str:
 
 def _extract_issue(text: str) -> str:
     m = re.search(r"\bVol(?:ume)?\.?\s*\d+\s*[\(,]\s*(\d+)\s*[\),]", text[:5000], re.IGNORECASE)
-    if m: return m.group(1)
+    if m:
+        return m.group(1)
     m = re.search(r"\b(?:Issue|No\.?|Number|Num\.?)\s*\.?\s*(\d+)", text[:5000], re.IGNORECASE)
     return m.group(1) if m else ""
 
