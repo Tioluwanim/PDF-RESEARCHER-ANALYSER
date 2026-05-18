@@ -16,7 +16,7 @@ from typing import Optional
 
 import numpy as np
 
-# Silence all HF noise before imports
+# Silence all HF noise — set before sentence_transformers loads on first use
 os.environ.setdefault("TOKENIZERS_PARALLELISM",        "false")
 os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
 os.environ.setdefault("TRANSFORMERS_VERBOSITY",        "error")
@@ -24,7 +24,8 @@ logging.getLogger("transformers").setLevel(logging.ERROR)
 logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
 logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
 
-from sentence_transformers import SentenceTransformer  # noqa: E402
+# sentence_transformers is imported LAZILY inside _get_or_load_model so that
+# importing this module never fails if the package is not installed yet.
 
 from app.config import EMBEDDING_MODEL, EMBEDDING_DIMENSION
 from app.models.schemas import TextChunk
@@ -32,18 +33,14 @@ from app.utils.logger import get_logger, ServiceLogger
 
 logger = get_logger(__name__)
 
-# Streamlit session-state key for the cached model
 _ST_CACHE_KEY = "_embedding_model_singleton"
+_module_model_cache: Optional[object] = None
 
 
-def _get_or_load_model(model_name: str) -> SentenceTransformer:
-    """
-    Returns the SentenceTransformer model from Streamlit session state cache
-    if available, otherwise loads it and caches it.
+def _get_or_load_model(model_name: str):
+    """Load SentenceTransformer lazily — only when embeddings are first needed."""
+    from sentence_transformers import SentenceTransformer  # lazy import
 
-    Falls back to a plain module-level variable if not running under Streamlit.
-    """
-    # Try Streamlit session state first (avoids reload on every rerun)
     try:
         import streamlit as st
         if _ST_CACHE_KEY not in st.session_state:
@@ -54,16 +51,12 @@ def _get_or_load_model(model_name: str) -> SentenceTransformer:
     except Exception:
         pass
 
-    # Fallback: module-level cache
     global _module_model_cache
     if _module_model_cache is None:
         logger.info("Loading embedding model '%s' …", model_name)
         _module_model_cache = SentenceTransformer(model_name)
         logger.info("Embedding model loaded ✓")
     return _module_model_cache
-
-
-_module_model_cache: Optional[SentenceTransformer] = None
 
 
 class EmbeddingService:
@@ -80,7 +73,7 @@ class EmbeddingService:
     # ── Model property ────────────────────────────────────────────────────────
 
     @property
-    def model(self) -> SentenceTransformer:
+    def model(self):
         m = _get_or_load_model(self._model_name)
         # Sync dimension on first load
         if self._dimension == EMBEDDING_DIMENSION:
