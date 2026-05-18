@@ -161,3 +161,29 @@ def handle_upload(pdf_file) -> None:
     except Exception as exc:
         logger.error("Upload failed: %s", exc)
         st.error("Upload failed. Please try again.")
+
+
+def render_sidebar() -> None:
+    st.sidebar.markdown(
+        """
+        ## PDF Research Analyzer
+        Upload documents, manage cache, and access the library from here.
+        """,
+    )
+
+    uploaded_file = st.sidebar.file_uploader(
+        "Upload a file",
+        type=["pdf", "docx", "doc", "txt", "xlsx", "xls", "csv"],
+        help="Supported formats: PDF, DOCX, TXT, XLSX, XLS, CSV",
+        key="sidebar_upload",
+    )
+
+    if uploaded_file is not None:
+        handle_upload(uploaded_file)
+
+    st.sidebar.markdown("---")
+    st.sidebar.caption("Maximum upload size: 50 MB")
+
+    if st.sidebar.button("Delete all documents", key="delete_all_docs"):
+        delete_all_docs()
+        st.success("All documents and cached data have been removed.")
