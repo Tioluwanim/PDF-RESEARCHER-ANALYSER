@@ -430,6 +430,55 @@ CHUNK_OVERLAP = _env_int(
     50,
 )
 
+SECTION_KEYWORDS: dict[str, list[str]] = {
+    "abstract": [
+        "abstract",
+        "summary",
+        "executive summary",
+        "overview",
+    ],
+    "introduction": [
+        "introduction",
+        "background",
+        "background and motivation",
+        "background and related work",
+    ],
+    "methods": [
+        "methods",
+        "materials and methods",
+        "methodology",
+        "experimental",
+        "experimental setup",
+    ],
+    "results": [
+        "results",
+        "findings",
+        "outcomes",
+        "experimental results",
+        "clinical results",
+    ],
+    "discussion": [
+        "discussion",
+        "analysis",
+        "interpretation",
+        "discussion and conclusion",
+    ],
+    "conclusion": [
+        "conclusion",
+        "conclusions",
+        "summary and conclusion",
+        "future work",
+        "limitations",
+    ],
+    "references": [
+        "references",
+        "bibliography",
+        "works cited",
+        "citations",
+        "sources",
+    ],
+}
+
 MIN_CHUNK_LENGTH = _env_int(
     "MIN_CHUNK_LENGTH",
     50,
@@ -669,6 +718,7 @@ __all__ = [
     # Chunking
     "CHUNK_SIZE",
     "CHUNK_OVERLAP",
+    "SECTION_KEYWORDS",
     "MIN_CHUNK_LENGTH",
 
     # Retrieval
