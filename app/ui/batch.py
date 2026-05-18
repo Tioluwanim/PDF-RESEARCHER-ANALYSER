@@ -110,7 +110,7 @@ def _run_batch(uploaded_files) -> None:
             f'<span style="color:{r["color"]};font-weight:700;min-width:1rem;">{r["icon"]}</span>'
             f'<span style="flex:1;">{html.escape(r["filename"][:40])}</span>'
             f'<span style="font-family:var(--f-mono);font-size:0.7rem;color:var(--muted);">'
-            + (f'{r["pages"]}p · {r["words"]:,}w · {r["chunks"]} chunks' if r["status"] == "ready" else f'<span style="color:var(--accent);">{html.escape(r["error"][:40])}</span>')
+            + (f'{r["pages"]}p · {r["words"]:,}w · {r["chunks"]} chunks' if r["status"] == "ready" else f'<span style="color:var(--accent);">{html.escape((r["error"] or "failed")[:40])}</span>')
             + '</span></div>'
             for r in rows
         )

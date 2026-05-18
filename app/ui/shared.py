@@ -22,9 +22,45 @@ def fmt_number(value: int | float) -> str:
 
 
 def md_to_html(text: str) -> str:
+    """Convert lightweight markdown to safe HTML for chat bubbles."""
+    import re
     if not text:
         return ""
-    return html.escape(text).replace("\n", "<br>")
+    t = html.escape(text)
+    # Fenced code blocks
+    t = re.sub(
+        r"```(?:\w+\n)?(.*?)```",
+        lambda m: (
+            '<pre style="background:var(--surface);padding:0.7rem 1rem;'
+            'border-radius:6px;font-family:var(--f-mono);'
+            f'font-size:0.8rem;overflow-x:auto;margin:0.5rem 0;">'
+            f'{m.group(1).strip()}</pre>'
+        ),
+        t, flags=re.DOTALL,
+    )
+    t = re.sub(r"`([^`]+)`", r'<code>\1</code>', t)
+    t = re.sub(r"\*\*(.+?)\*\*", r'<strong>\1</strong>', t)
+    t = re.sub(r"\*(.+?)\*", r'<em>\1</em>', t)
+
+    def _bullets(m: re.Match) -> str:
+        items = re.findall(r"^[-•]\s+(.+)$", m.group(0), re.MULTILINE)
+        return "<ul>" + "".join(f"<li>{i}</li>" for i in items) + "</ul>"
+
+    def _nums(m: re.Match) -> str:
+        items = re.findall(r"^\d+\.\s+(.+)$", m.group(0), re.MULTILINE)
+        return "<ol>" + "".join(f"<li>{i}</li>" for i in items) + "</ol>"
+
+    t = re.sub(r"(^[-•]\s+.+$\n?)+", _bullets, t, flags=re.MULTILINE)
+    t = re.sub(r"(^\d+\.\s+.+$\n?)+", _nums, t, flags=re.MULTILINE)
+
+    paragraphs = [p.strip() for p in re.split(r"\n\n+", t) if p.strip()]
+    result = []
+    for p in paragraphs:
+        if p.startswith(("<ul>", "<ol>", "<pre>")):
+            result.append(p)
+        else:
+            result.append(f"<p>{p.replace(chr(10), '<br>')}</p>")
+    return "\n".join(result)
 
 
 def delete_doc_cache(doc_id: str) -> None:
@@ -91,7 +127,7 @@ def handle_chat(doc_id: str, question: str) -> None:
             container.markdown(
                 '<div class="msg-wrap asst">'
                 '<div class="msg-avatar asst">📚</div>'
-                f'<div class="msg-bubble asst">{html.escape(full_reply)}'
+                f'<div class="msg-bubble asst">{md_to_html(full_reply)}'
                 f'<span style="color:var(--accent);animation:pulse 1s infinite;">▌</span></div>'
                 '</div>',
                 unsafe_allow_html=True,

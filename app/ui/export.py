@@ -58,6 +58,8 @@ def render_export_tab() -> None:
     st.markdown("<br>", unsafe_allow_html=True)
 
     c1, c2, c3, c4 = st.columns(4)
+    if "export_data" not in st.session_state:
+        st.session_state.export_data = {}
     export_cache = st.session_state.export_data
     fname_suffix = "_theses" if template == "thesis" else "_journal"
 
