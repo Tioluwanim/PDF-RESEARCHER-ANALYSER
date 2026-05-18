@@ -66,7 +66,13 @@ from html import unescape
 from pathlib import Path
 from typing import Optional
 
-import fitz  # PyMuPDF
+try:
+    import fitz  # PyMuPDF
+except ImportError as exc:
+    raise ImportError(
+        "PyMuPDF is required for PDF extraction. "
+        "Install it with `pip install PyMuPDF` or ensure `PyMuPDF` is listed in requirements.txt."
+    ) from exc
 
 from app.config import (
     CHUNK_SIZE,

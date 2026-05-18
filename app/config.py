@@ -589,6 +589,32 @@ def validate_config() -> list[str]:
     return issues
 
 
+def get_config_summary() -> dict[str, str | int | bool]:
+    """
+    Return a sanitized app configuration summary for startup logging.
+    """
+
+    return {
+        "app_title": APP_TITLE,
+        "version": APP_VERSION,
+        "debug": DEBUG,
+        "log_level": LOG_LEVEL,
+        "streamlit_layout": STREAMLIT_LAYOUT,
+        "streamlit_sidebar_state": STREAMLIT_SIDEBAR_STATE,
+        "max_chat_history": MAX_CHAT_HISTORY,
+        "database_url": DATABASE_URL,
+        "openrouter_model": OPENROUTER_MODEL,
+        "huggingface_model": HUGGINGFACE_MODEL,
+        "embedding_model": EMBEDDING_MODEL,
+        "chunk_size": CHUNK_SIZE,
+        "chunk_overlap": CHUNK_OVERLAP,
+        "top_k_results": TOP_K_RESULTS,
+        "max_tokens": MAX_TOKENS,
+        "temperature": TEMPERATURE,
+        "max_file_size_mb": MAX_FILE_SIZE_MB,
+    }
+
+
 # =============================================================================
 # EXPORTS
 # =============================================================================
@@ -678,4 +704,5 @@ __all__ = [
 
     # Validation
     "validate_config",
+    "get_config_summary",
 ]
