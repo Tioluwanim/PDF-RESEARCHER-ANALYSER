@@ -19,7 +19,14 @@ import numpy as np
 from pathlib import Path
 from typing import Optional
 
-import faiss
+def _get_faiss_module():
+    try:
+        import faiss
+        return faiss
+    except ImportError as exc:
+        raise ImportError(
+            "FAISS is required for vector search. Install faiss-cpu or faiss-gpu, or disable embedding features."
+        ) from exc
 
 from app.db.repository import repository
 from app.config import (

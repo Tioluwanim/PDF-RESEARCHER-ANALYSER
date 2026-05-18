@@ -66,20 +66,23 @@ from html import unescape
 from pathlib import Path
 from typing import Optional
 
-try:
-    import fitz  # PyMuPDF
-except ImportError as exc:
-    raise ImportError(
-        "PyMuPDF is required for PDF extraction. "
-        "Install it with `pip install PyMuPDF` or ensure `PyMuPDF` is listed in requirements.txt."
-    ) from exc
-
 from app.config import (
     CHUNK_SIZE,
     CHUNK_OVERLAP,
     MIN_CHUNK_LENGTH,
     SECTION_KEYWORDS,
 )
+
+
+def _get_fitz_module():
+    try:
+        import fitz  # PyMuPDF
+        return fitz
+    except ImportError as exc:
+        raise ImportError(
+            "PyMuPDF is required for PDF extraction. "
+            "Install it with `pip install PyMuPDF` or ensure `PyMuPDF` is listed in requirements.txt."
+        ) from exc
 from app.models.schemas import (
     ProcessedDocument,
     DocumentMetadata,
@@ -277,6 +280,8 @@ class ExtractionService:
         page0_blocks:  list[dict]  = []
         total_words    = 0
         ocr_page_count = 0
+
+        fitz = _get_fitz_module()
 
         with fitz.open(str(pdf_path)) as pdf:
             page_count  = len(pdf)

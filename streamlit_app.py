@@ -16,6 +16,19 @@ os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 # Tell transformers not to scan vision models (prevents torchvision import)
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "0")
+# Provide a lightweight dummy for torchvision if it's not installed so
+# Streamlit's file-watcher or transformers optional imports won't crash startup.
+try:
+    import torchvision  # type: ignore
+except Exception:
+    import types
+    _tv = types.ModuleType("torchvision")
+    # common submodules referenced by transformers/vision
+    for sub in ("transforms", "models", "io", "ops", "datasets"):
+        setattr(_tv, sub, types.ModuleType(f"torchvision.{sub}"))
+        # also register in sys.modules so `import torchvision.transforms` works
+        sys.modules[f"torchvision.{sub}"] = getattr(_tv, sub)
+    sys.modules["torchvision"] = _tv
 
 ROOT = Path(__file__).parent.resolve()
 if str(ROOT) not in sys.path:

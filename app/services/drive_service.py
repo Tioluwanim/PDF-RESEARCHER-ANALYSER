@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
-from app.config import UPLOAD_DIR
+from app.config import UPLOAD_DIR, BASE_DIR
 from app.db.repository import repository
 from app.models.schemas import (
     DocumentMetadata,
@@ -43,7 +43,14 @@ class DriveService:
         self._folder_id: str | None = self._parse_folder_id(
             os.getenv("GOOGLE_DRIVE_FOLDER_ID", "").strip() or None
         )
-        self._creds_path: str = os.getenv("GOOGLE_CREDENTIALS_PATH", "credentials.json")
+        raw_creds_path = os.getenv("GOOGLE_CREDENTIALS_PATH", "credentials.json")
+        # Resolve credentials path relative to project BASE_DIR when a
+        # non-absolute path is provided. This ensures files materialized by
+        # `app.config` (from Streamlit secrets) are discovered correctly.
+        if raw_creds_path and os.path.isabs(raw_creds_path):
+            self._creds_path = raw_creds_path
+        else:
+            self._creds_path = str(BASE_DIR / raw_creds_path)
         self.upload_dir = UPLOAD_DIR
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self.last_sync: datetime | None = None
