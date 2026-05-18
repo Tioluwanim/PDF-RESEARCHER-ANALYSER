@@ -282,8 +282,12 @@ SQLALCHEMY_ECHO = _env_bool(
 # GOOGLE DRIVE
 # =============================================================================
 
-GOOGLE_DRIVE_FOLDER_ID = _env_str(
-    "GOOGLE_DRIVE_FOLDER_ID"
+_raw_folder_id = _env_str("GOOGLE_DRIVE_FOLDER_ID")
+
+GOOGLE_DRIVE_FOLDER_ID = (
+    _raw_folder_id.rstrip("/").split("/")[-1]
+    if _raw_folder_id.startswith("http")
+    else _raw_folder_id
 )
 
 GOOGLE_CREDENTIALS_PATH = _env_str(
@@ -296,16 +300,48 @@ GOOGLE_CREDENTIALS_SECRET_SECTION = _env_str(
     "gcp_service_account",
 )
 
-GOOGLE_CREDENTIALS_JSON = _env_str(
-    "GOOGLE_CREDENTIALS_JSON"
-)
+
+def _build_google_credentials_json() -> str:
+    """
+    Assembles Google credentials JSON from individual env vars 
+    (type, project_id, private_key, etc.) or falls back to existing methods.
+    """
+    gc_keys = [
+        "type",
+        "project_id",
+        "private_key_id",
+        "private_key",
+        "client_email",
+        "client_id",
+        "auth_uri",
+        "token_uri",
+        "auth_provider_x509_cert_url",
+        "client_x509_cert_url",
+        "universe_domain",
+    ]
+    
+    creds_dict = {}
+    for key in gc_keys:
+        val = _env_str(key)
+        if val:
+            if key == "private_key":
+                val = val.replace("\\n", "\n")
+            creds_dict[key] = val
+            
+    if creds_dict.get("private_key") and creds_dict.get("client_email"):
+        return json.dumps(creds_dict)
+    
+    return ""
+
+
+GOOGLE_CREDENTIALS_JSON = _env_str("GOOGLE_CREDENTIALS_JSON") or _build_google_credentials_json()
 
 
 def _materialize_google_credentials_file() -> None:
     """
     Create Google credentials file from:
     1. Existing credentials file
-    2. GOOGLE_CREDENTIALS_JSON env var
+    2. GOOGLE_CREDENTIALS_JSON env var / assembled keys
     3. Streamlit secrets section
     """
 
@@ -317,7 +353,7 @@ def _materialize_google_credentials_file() -> None:
     if cred_path.exists():
         return
 
-    # Try JSON env variable
+    # Try JSON env variable or assembled individual keys
     raw_json = GOOGLE_CREDENTIALS_JSON
 
     if raw_json:
