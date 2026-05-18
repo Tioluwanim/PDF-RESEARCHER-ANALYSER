@@ -96,18 +96,18 @@ def _resolved_path(path_value: str) -> Path:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Streamlit secrets support
+# Streamlit Secrets Support
 # ─────────────────────────────────────────────────────────────────────────────
 def _load_streamlit_secrets_into_env() -> None:
     """
     Safely load Streamlit secrets into environment variables.
 
-    Compatible with:
+    Works with:
     - Streamlit Cloud
     - Local Streamlit
     - CLI scripts
     - Alembic
-    - Unit tests
+    - Tests
     """
 
     try:
@@ -123,7 +123,6 @@ def _load_streamlit_secrets_into_env() -> None:
                 os.environ.setdefault(key, value)
 
     except Exception:
-        # Never crash config loading because of Streamlit
         return
 
 
@@ -182,7 +181,7 @@ def _write_json_file(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Load environment variables
+# Load Environment Variables
 # ─────────────────────────────────────────────────────────────────────────────
 ENV_PATH = BASE_DIR / ".env"
 
@@ -195,7 +194,7 @@ _load_streamlit_secrets_into_env()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Ensure required directories exist
+# Ensure Directories Exist
 # ─────────────────────────────────────────────────────────────────────────────
 for directory in [
     DATA_DIR,
@@ -232,6 +231,30 @@ LOG_LEVEL = _env_str(
     "LOG_LEVEL",
     "INFO",
 ).upper()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Streamlit UI Settings
+# ─────────────────────────────────────────────────────────────────────────────
+STREAMLIT_PAGE_TITLE = _env_str(
+    "STREAMLIT_PAGE_TITLE",
+    APP_TITLE,
+)
+
+STREAMLIT_PAGE_ICON = _env_str(
+    "STREAMLIT_PAGE_ICON",
+    "📄",
+)
+
+STREAMLIT_LAYOUT = _env_str(
+    "STREAMLIT_LAYOUT",
+    "wide",
+)
+
+STREAMLIT_INITIAL_SIDEBAR_STATE = _env_str(
+    "STREAMLIT_INITIAL_SIDEBAR_STATE",
+    "expanded",
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -274,7 +297,7 @@ def _materialize_google_credentials_file() -> None:
     """
     Creates credentials.json automatically from:
     1. GOOGLE_CREDENTIALS_JSON
-    2. Streamlit secrets section
+    2. Streamlit secrets
     """
 
     try:
@@ -282,11 +305,11 @@ def _materialize_google_credentials_file() -> None:
             GOOGLE_CREDENTIALS_PATH
         )
 
-        # If file already exists, do nothing
+        # File already exists
         if cred_path.exists():
             return
 
-        # Option 1: JSON string from env
+        # Option 1: Env JSON
         if GOOGLE_CREDENTIALS_JSON:
             try:
                 parsed = json.loads(
@@ -315,7 +338,6 @@ def _materialize_google_credentials_file() -> None:
             )
 
     except Exception:
-        # Never crash app startup because of credentials
         pass
 
 
@@ -492,7 +514,6 @@ ALLOWED_EXTENSIONS = {
 def validate_config() -> list[str]:
     issues: list[str] = []
 
-    # Optional checks
     if not OPENROUTER_API_KEY:
         issues.append(
             "OPENROUTER_API_KEY is missing"
@@ -514,48 +535,79 @@ def validate_config() -> list[str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Exported names
+# Exports
 # ─────────────────────────────────────────────────────────────────────────────
 __all__ = [
-    "APP_TITLE",
-    "APP_VERSION",
-    "DEBUG",
-    "LOG_LEVEL",
-    "DATABASE_URL",
-    "SQLALCHEMY_ECHO",
-    "GOOGLE_DRIVE_FOLDER_ID",
-    "GOOGLE_CREDENTIALS_PATH",
-    "OPENROUTER_API_KEY",
-    "OPENROUTER_BASE_URL",
-    "OPENROUTER_MODEL",
-    "OPENROUTER_TIMEOUT",
-    "OPENROUTER_RATE_LIMIT_DELAY",
-    "HUGGINGFACE_API_KEY",
-    "HUGGINGFACE_BASE_URL",
-    "HUGGINGFACE_MODEL",
-    "HUGGINGFACE_TIMEOUT",
-    "EMBEDDING_MODEL",
-    "EMBEDDING_DIMENSION",
-    "CHUNK_SIZE",
-    "CHUNK_OVERLAP",
-    "MIN_CHUNK_LENGTH",
-    "TOP_K_RESULTS",
-    "SIMILARITY_THRESHOLD",
-    "MAX_TOKENS",
-    "TEMPERATURE",
-    "CONTEXT_WINDOW_TOKENS",
-    "RETRY_MAX_ATTEMPTS",
-    "RETRY_BASE_DELAY",
-    "RETRY_MAX_DELAY",
-    "RETRY_BACKOFF_FACTOR",
-    "MAX_FILE_SIZE_MB",
-    "MAX_FILE_SIZE_BYTES",
-    "ALLOWED_EXTENSIONS",
+    # Paths
     "BASE_DIR",
     "DATA_DIR",
     "UPLOAD_DIR",
     "PROCESSED_DIR",
     "VECTORSTORE_DIR",
     "LOGS_DIR",
+
+    # App
+    "APP_TITLE",
+    "APP_VERSION",
+    "DEBUG",
+    "LOG_LEVEL",
+
+    # Streamlit
+    "STREAMLIT_PAGE_TITLE",
+    "STREAMLIT_PAGE_ICON",
+    "STREAMLIT_LAYOUT",
+    "STREAMLIT_INITIAL_SIDEBAR_STATE",
+
+    # Database
+    "DATABASE_URL",
+    "SQLALCHEMY_ECHO",
+
+    # Google
+    "GOOGLE_DRIVE_FOLDER_ID",
+    "GOOGLE_CREDENTIALS_PATH",
+
+    # OpenRouter
+    "OPENROUTER_API_KEY",
+    "OPENROUTER_BASE_URL",
+    "OPENROUTER_MODEL",
+    "OPENROUTER_TIMEOUT",
+    "OPENROUTER_RATE_LIMIT_DELAY",
+
+    # HuggingFace
+    "HUGGINGFACE_API_KEY",
+    "HUGGINGFACE_BASE_URL",
+    "HUGGINGFACE_MODEL",
+    "HUGGINGFACE_TIMEOUT",
+
+    # Embeddings
+    "EMBEDDING_MODEL",
+    "EMBEDDING_DIMENSION",
+
+    # Chunking
+    "CHUNK_SIZE",
+    "CHUNK_OVERLAP",
+    "MIN_CHUNK_LENGTH",
+
+    # Retrieval
+    "TOP_K_RESULTS",
+    "SIMILARITY_THRESHOLD",
+
+    # Generation
+    "MAX_TOKENS",
+    "TEMPERATURE",
+    "CONTEXT_WINDOW_TOKENS",
+
+    # Retry
+    "RETRY_MAX_ATTEMPTS",
+    "RETRY_BASE_DELAY",
+    "RETRY_MAX_DELAY",
+    "RETRY_BACKOFF_FACTOR",
+
+    # Upload
+    "MAX_FILE_SIZE_MB",
+    "MAX_FILE_SIZE_BYTES",
+    "ALLOWED_EXTENSIONS",
+
+    # Validation
     "validate_config",
 ]
