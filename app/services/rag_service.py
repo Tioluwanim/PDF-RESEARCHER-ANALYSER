@@ -21,6 +21,7 @@ from typing import Optional
 
 import faiss
 
+from app.db.repository import repository
 from app.config import (
     VECTORSTORE_DIR,
     TOP_K_RESULTS,
@@ -33,6 +34,7 @@ from app.models.schemas import (
     SearchResult,
     SearchResponse,
     DocumentStatus,
+    SectionType,
 )
 from app.services.embedding_service import embedding_service
 from app.utils.logger import get_logger, ServiceLogger
@@ -73,6 +75,8 @@ class RAGService:
             embeddings = embedding_service.embed_chunks(
                 chunks=doc.chunks, doc_id=doc.doc_id
             )
+            repository.save_chunks(doc.doc_id, doc.chunks, embeddings=embeddings)
+            self._index_cache.pop("library", None)
 
             dimension = embeddings.shape[1]
             index     = faiss.IndexFlatIP(dimension)
@@ -108,6 +112,274 @@ class RAGService:
             slog.error("Index build failed: %s", e)
 
         return doc
+
+    def _library_index_dir(self) -> Path:
+        return self.vectorstore_dir / "library"
+
+    def library_index_exists(self) -> bool:
+        return (self._library_index_dir() / "index.faiss").exists()
+
+    def _load_library_index(self) -> tuple[Optional[faiss.Index], list[TextChunk]]:
+        cache_key = "library"
+        if cache_key in self._index_cache:
+            return self._index_cache[cache_key]
+
+        index_path  = self._library_index_dir() / "index.faiss"
+        chunks_path = self._library_index_dir() / "chunks.json"
+        if not index_path.exists() or not chunks_path.exists():
+            return None, []
+
+        try:
+            index  = faiss.read_index(str(index_path))
+            chunks = [TextChunk.model_validate(c) for c in json.loads(chunks_path.read_text(encoding="utf-8"))]
+            self._index_cache[cache_key] = (index, chunks)
+            logger.info("Library index loaded — %d vectors, %d chunk records", index.ntotal, len(chunks))
+            return index, chunks
+        except Exception as e:
+            logger.error("Failed to load library index: %s", e)
+            return None, []
+
+    def build_library_index(
+        self,
+        doc_ids: list[str] | None = None,
+        author: str | None = None,
+        year: str | None = None,
+        section_type: SectionType | None = None,
+        page_number: int | None = None,
+        force: bool = False,
+    ) -> tuple[Optional[faiss.Index], list[TextChunk]]:
+        log_key = "library"
+        slog    = ServiceLogger("rag_service", doc_id="library")
+        slog.info("Building library FAISS index")
+
+        has_filters = bool(doc_ids or author or year or section_type or page_number is not None)
+        if not force and not has_filters and self.library_index_exists():
+            return self._load_library_index()
+
+        rows = repository.get_library_chunks(
+            doc_ids=doc_ids,
+            author=author,
+            year=year,
+            section_type=section_type,
+            page_number=page_number,
+        )
+        if not rows:
+            slog.warning("No ready chunks found for library index")
+            return None, []
+
+        chunks: list[TextChunk] = []
+        embeddings: list[np.ndarray] = []
+        for chunk_record, document in rows:
+            if not chunk_record.embedding:
+                continue
+            chunks.append(
+                TextChunk(
+                    chunk_id=chunk_record.id,
+                    doc_id=document.doc_id,
+                    content=chunk_record.content,
+                    section_type=SectionType(chunk_record.section_type),
+                    chunk_index=chunk_record.chunk_index,
+                    total_chunks=chunk_record.total_chunks,
+                    page_number=chunk_record.page_number,
+                    word_count=chunk_record.word_count,
+                    char_count=chunk_record.char_count,
+                )
+            )
+            embeddings.append(np.frombuffer(chunk_record.embedding, dtype=np.float32))
+
+        if not embeddings:
+            slog.warning("No embeddings available for library index")
+            return None, []
+
+        matrix = np.vstack(embeddings)
+        dimension = matrix.shape[1]
+        index = faiss.IndexFlatIP(dimension)
+        index.add(matrix)
+
+        if not has_filters:
+            index_dir = self._library_index_dir()
+            index_dir.mkdir(parents=True, exist_ok=True)
+            faiss.write_index(index, str(index_dir / "index.faiss"))
+            (index_dir / "chunks.json").write_text(
+                json.dumps([c.model_dump() for c in chunks], default=str, indent=2),
+                encoding="utf-8",
+            )
+            self._index_cache[log_key] = (index, chunks)
+        slog.info("Library index built — %d vectors, %d chunks", index.ntotal, len(chunks))
+        return index, chunks
+
+    def search_library(
+        self,
+        query: str,
+        top_k: int = TOP_K_RESULTS,
+        threshold: float = SIMILARITY_THRESHOLD,
+        doc_ids: list[str] | None = None,
+        author: str | None = None,
+        year: str | None = None,
+        section_type: SectionType | None = None,
+        page_number: int | None = None,
+    ) -> SearchResponse:
+        slog       = ServiceLogger("rag_service", doc_id="library")
+        start_time = time.time()
+
+        has_filters = bool(doc_ids or author or year or section_type or page_number is not None)
+        if has_filters:
+            index, chunks = self.build_library_index(
+                doc_ids=doc_ids,
+                author=author,
+                year=year,
+                section_type=section_type,
+                page_number=page_number,
+                force=True,
+            )
+        else:
+            index, chunks = self._load_library_index()
+        if index is None or not chunks:
+            index, chunks = self.build_library_index(
+                doc_ids=doc_ids,
+                author=author,
+                year=year,
+                section_type=section_type,
+                page_number=page_number,
+                force=True,
+            )
+            if index is None or not chunks:
+                return SearchResponse(query=query, doc_id="library", results=[], total_found=0)
+
+        query_vec = embedding_service.embed_query(query)
+        actual_k  = min(top_k, index.ntotal)
+        scores, indices = index.search(query_vec, actual_k)
+
+        results: list[SearchResult] = []
+        for rank, (score, idx) in enumerate(zip(scores[0], indices[0]), start=1):
+            if idx == -1 or float(score) < threshold:
+                continue
+            results.append(
+                SearchResult(
+                    chunk = chunks[idx],
+                    score = round(float(score), 4),
+                    rank  = rank,
+                )
+            )
+
+        elapsed_ms = round((time.time() - start_time) * 1000, 2)
+        slog.info(
+            "Library search complete — %d/%d results above threshold=%.2f in %.1fms",
+            len(results), actual_k, threshold, elapsed_ms,
+        )
+
+        return SearchResponse(
+            query=query,
+            doc_id="library",
+            results=results,
+            total_found=len(results),
+            search_time_ms=elapsed_ms,
+        )
+
+    def get_library_context(
+        self,
+        query: str,
+        top_k: int = TOP_K_RESULTS,
+        threshold: float = SIMILARITY_THRESHOLD,
+        max_chars: int = 6000,
+        doc_ids: list[str] | None = None,
+        author: str | None = None,
+        year: str | None = None,
+        section_type: SectionType | None = None,
+        page_number: int | None = None,
+    ) -> tuple[str, list[SearchResult]]:
+        slog = ServiceLogger("rag_service", doc_id="library")
+        start_time = time.time()
+
+        has_filters = bool(doc_ids or author or year or section_type or page_number is not None)
+        if has_filters:
+            index, chunks = self.build_library_index(
+                doc_ids=doc_ids,
+                author=author,
+                year=year,
+                section_type=section_type,
+                page_number=page_number,
+                force=True,
+            )
+        else:
+            index, chunks = self._load_library_index()
+        if index is None or not chunks:
+            index, chunks = self.build_library_index(
+                doc_ids=doc_ids,
+                author=author,
+                year=year,
+                section_type=section_type,
+                page_number=page_number,
+                force=True,
+            )
+            if index is None or not chunks:
+                return "", []
+
+        queries = self._expand_query(query)
+        slog.debug("Library multi-query variants: %s", queries)
+
+        seen_ids: set[str] = set()
+        all_results: list[SearchResult] = []
+        for q in queries:
+            try:
+                qvec = embedding_service.embed_query(q)
+                actual_k = min(top_k * 2, index.ntotal)
+                scores, indices = index.search(qvec, actual_k)
+                for score, idx in zip(scores[0], indices[0]):
+                    if idx == -1:
+                        continue
+                    chunk = chunks[idx]
+                    if chunk.chunk_id in seen_ids:
+                        continue
+                    if float(score) >= threshold:
+                        seen_ids.add(chunk.chunk_id)
+                        all_results.append(
+                            SearchResult(chunk=chunk, score=round(float(score), 4), rank=0)
+                        )
+            except Exception as e:
+                slog.warning("Library search variant failed: %s", e)
+
+        if not all_results:
+            qvec = embedding_service.embed_query(queries[0])
+            actual_k = min(top_k, index.ntotal)
+            scores, indices = index.search(qvec, actual_k)
+            for score, idx in zip(scores[0], indices[0]):
+                if idx == -1:
+                    continue
+                chunk = chunks[idx]
+                if chunk.chunk_id not in seen_ids:
+                    seen_ids.add(chunk.chunk_id)
+                    all_results.append(
+                        SearchResult(chunk=chunk, score=round(float(score), 4), rank=0)
+                    )
+
+        all_results.sort(key=lambda r: r.score, reverse=True)
+        for i, r in enumerate(all_results):
+            r.rank = i + 1
+
+        context_parts: list[str] = []
+        total_chars = 0
+        used_results: list[SearchResult] = []
+
+        for result in all_results[:top_k]:
+            header = (
+                f"[{result.chunk.doc_id} | {result.chunk.section_type.value.upper()} | "
+                f"Score: {result.score:.3f}]"
+            )
+            chunk_text = f"{header}\n{result.chunk.content}"
+            if total_chars + len(chunk_text) > max_chars:
+                remaining = max_chars - total_chars
+                if remaining > 200:
+                    context_parts.append(chunk_text[:remaining] + "…")
+                    used_results.append(result)
+                break
+            context_parts.append(chunk_text)
+            used_results.append(result)
+            total_chars += len(chunk_text)
+
+        context = "\n\n---\n\n".join(context_parts)
+        slog.info("Library context built — %d chunks, %d chars", len(used_results), len(context))
+        return context, used_results
 
     # ── Search ────────────────────────────────────────────────────────────────
 
@@ -291,6 +563,7 @@ class RAGService:
         import shutil
         index_dir = self._index_dir(doc_id)
         self._index_cache.pop(doc_id, None)
+        self._index_cache.pop("library", None)
         if index_dir.exists():
             shutil.rmtree(index_dir)
             logger.info("[%s] FAISS index deleted", doc_id)

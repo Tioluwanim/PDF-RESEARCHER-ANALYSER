@@ -21,6 +21,8 @@ from app.services.pdf_service        import pdf_service
 from app.services.extraction_service import extraction_service
 from app.services.rag_service        import rag_service
 from app.services.ai_router          import ai_router
+from app.services.drive_service      import drive_service
+from app.db.repository import repository
 from app.config import TOP_K_RESULTS, SIMILARITY_THRESHOLD
 from app.utils.logger import get_logger, ServiceLogger
 
@@ -99,6 +101,10 @@ class AnalysisService:
 
         except Exception as e:
             slog.error("Pipeline failed: %s", e)
+            try:
+                pdf_service.update_status(doc_id, DocumentStatus.FAILED, str(e))
+            except Exception:
+                pass
             return AnalysisResponse(
                 doc_id=doc_id,
                 status=DocumentStatus.FAILED,
@@ -262,12 +268,87 @@ class AnalysisService:
 
     def semantic_search(
         self,
-        doc_id    : str,
+        doc_id    : str | None,
         query     : str,
         top_k     : int   = TOP_K_RESULTS,
         threshold : float = SIMILARITY_THRESHOLD,
+        author    : str | None = None,
+        year      : str | None = None,
+        section_type: SectionType | None = None,
     ) -> SearchResponse:
-        return rag_service.search(doc_id, query, top_k, threshold)
+        if doc_id:
+            return rag_service.search(doc_id, query, top_k, threshold)
+        return rag_service.search_library(
+            query=query,
+            top_k=top_k,
+            threshold=threshold,
+            author=author,
+            year=year,
+            section_type=section_type,
+        )
+
+    def library_search(
+        self,
+        query     : str,
+        top_k     : int   = TOP_K_RESULTS,
+        threshold : float = SIMILARITY_THRESHOLD,
+        doc_ids   : list[str] | None = None,
+        author    : str | None = None,
+        year      : str | None = None,
+        section_type: SectionType | None = None,
+        page_number: int | None = None,
+    ) -> SearchResponse:
+        return rag_service.search_library(
+            query=query,
+            top_k=top_k,
+            threshold=threshold,
+            doc_ids=doc_ids,
+            author=author,
+            year=year,
+            section_type=section_type,
+            page_number=page_number,
+        )
+
+    def library_chat_stream(
+        self,
+        question: str,
+        history: list[ChatMessage],
+        top_k: int = TOP_K_RESULTS,
+        threshold: float = SIMILARITY_THRESHOLD,
+        doc_ids: list[str] | None = None,
+        author: str | None = None,
+        year: str | None = None,
+        section_type: SectionType | None = None,
+    ) -> Generator[str, None, None]:
+        try:
+            repository.add_document_log(doc_id, "info", "Processing started")
+            context, sources = rag_service.get_library_context(
+                query=question,
+                top_k=top_k,
+                threshold=threshold,
+                doc_ids=doc_ids,
+                author=author,
+                year=year,
+                section_type=section_type,
+            )
+            if not context:
+                yield "No indexed library context was found. Sync or process documents, then rebuild the index."
+                return
+            source_lines = "\n".join(
+                f"- {r.chunk.doc_id}, page {r.chunk.page_number}, section {r.chunk.section_type.value}, score {r.score:.3f}"
+                for r in sources
+            )
+            prompt_context = f"{context}\n\nSource index:\n{source_lines}"
+            yield from ai_router.chat(
+                question=question,
+                context=prompt_context,
+                history=history,
+                doc_id="library",
+                stream=True,
+            )
+        except Exception as e:
+            logger.error("library_chat_stream failed: %s", e)
+            yield f"Chat error: {e}"
 
     # ── Document management ───────────────────────────────────────────────────
 
@@ -304,6 +385,42 @@ class AnalysisService:
                 "openrouter" : {"configured": bool(__import__("os").getenv("OPENROUTER_API_KEY")), "model": "unknown"},
                 "huggingface": {"configured": bool(__import__("os").getenv("HUGGINGFACE_API_KEY")), "model": "unknown"},
             }
+
+    def get_library_stats(self) -> dict:
+        try:
+            return repository.get_library_stats()
+        except Exception as e:
+            logger.error("get_library_stats failed: %s", e)
+            return {}
+
+    def get_recent_sync_runs(self, limit: int = 10) -> list:
+        try:
+            return repository.get_recent_sync_runs(limit=limit)
+        except Exception as e:
+            logger.error("get_recent_sync_runs failed: %s", e)
+            return []
+
+    def get_recent_logs(self, limit: int = 50) -> list[dict]:
+        try:
+            return repository.get_recent_processing_logs(limit=limit)
+        except Exception as e:
+            logger.error("get_recent_logs failed: %s", e)
+            return []
+
+    def sync_drive(self, on_file_found=None, on_file_done=None) -> dict:
+        return drive_service.sync(on_file_found=on_file_found, on_file_done=on_file_done)
+
+    def process_pending_ingestion_jobs(self, limit: int = 10, on_progress=None) -> dict:
+        from app.services.ingestion_service import ingestion_service
+        return ingestion_service.process_pending_jobs(limit=limit, on_progress=on_progress)
+
+    def rebuild_library_index(self) -> bool:
+        try:
+            index, chunks = rag_service.build_library_index(force=True)
+            return index is not None and bool(chunks)
+        except Exception as e:
+            logger.error("rebuild_library_index failed: %s", e)
+            return False
 
     # ── Private ───────────────────────────────────────────────────────────────
 

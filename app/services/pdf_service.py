@@ -15,6 +15,7 @@ from app.config import (
     MAX_FILE_SIZE_MB,
     ALLOWED_EXTENSIONS,
 )
+from app.db.repository import repository
 from app.models.schemas import (
     ProcessedDocument,
     DocumentMetadata,
@@ -41,6 +42,7 @@ class PDFService:
     def __init__(self):
         self.upload_dir    = UPLOAD_DIR
         self.processed_dir = PROCESSED_DIR
+        self.repository    = repository
         logger.info("PDFService initialised")
 
     # ── Upload ────────────────────────────────────────────────────────────────
@@ -157,10 +159,20 @@ class PDFService:
             metadata  = DocumentMetadata(file_size_bytes=file_size),
         )
 
-        # Persist initial state
-        self._save_document_state(doc)
+        self.repository.create_document(
+            doc_id         = doc_id,
+            filename       = filename,
+            local_path     = str(dest_path),
+            file_size_bytes= file_size,
+            mime_type      = "application/pdf",
+            source_folder  = None,
+            drive_file_id  = None,
+            checksum       = None,
+            modified_time  = None,
+            source         = "upload",
+        )
 
-        slog.info(f"Document state created — status={doc.status.value}")
+        slog.info(f"Document record created — status={doc.status.value}")
         return doc, None
 
     # ── Load / Save State ─────────────────────────────────────────────────────
@@ -175,6 +187,11 @@ class PDFService:
         Returns:
             ProcessedDocument if found, None otherwise.
         """
+        doc = self.repository.load_processed_document(doc_id)
+        if doc:
+            logger.debug(f"[{doc_id}] Loaded document from DB — status={doc.status.value}")
+            return doc
+
         state_path = self._state_path(doc_id)
         if not state_path.exists():
             logger.warning(f"[{doc_id}] State file not found: {state_path}")
@@ -182,7 +199,7 @@ class PDFService:
 
         try:
             doc = ProcessedDocument.model_validate_json(state_path.read_text(encoding="utf-8"))
-            logger.debug(f"[{doc_id}] Loaded document — status={doc.status.value}")
+            logger.debug(f"[{doc_id}] Loaded document from JSON state — status={doc.status.value}")
             return doc
         except Exception as e:
             logger.error(f"[{doc_id}] Failed to load state: {e}", exc_info=True)
@@ -190,14 +207,14 @@ class PDFService:
 
     def save_document(self, doc: ProcessedDocument) -> bool:
         """
-        Persists a ProcessedDocument to its JSON state file.
+        Persists a ProcessedDocument to the database.
         Updates updated_at timestamp automatically.
 
         Returns:
             True on success, False on failure.
         """
         doc.updated_at = datetime.utcnow()
-        return self._save_document_state(doc)
+        return self.repository.update_document(doc)
 
     def update_status(
         self,
@@ -231,37 +248,20 @@ class PDFService:
 
     def list_documents(self) -> list[dict]:
         """
-        Returns a list of all document summaries from state files.
+        Returns a list of all document summaries from the database.
         Used to populate the sidebar in the Streamlit UI.
-
-        Returns:
-            List of summary dicts (doc_id, filename, status, pages etc.)
         """
-        summaries = []
-        for state_file in sorted(
-            self.processed_dir.glob("*.json"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,  # most recent first
-        ):
-            try:
-                doc = ProcessedDocument.model_validate_json(
-                    state_file.read_text(encoding="utf-8")
-                )
-                summaries.append(doc.summary())
-            except Exception as e:
-                logger.warning(f"Could not parse state file {state_file.name}: {e}")
-
-        logger.debug(f"Listed {len(summaries)} documents")
-        return summaries
+        try:
+            return self.repository.list_documents()
+        except Exception as e:
+            logger.error("Failed to list documents: %s", e, exc_info=True)
+            return []
 
     # ── Delete Document ───────────────────────────────────────────────────────
 
     def delete_document(self, doc_id: str) -> bool:
         """
-        Deletes all files associated with a document:
-        - Uploaded PDF
-        - State JSON
-        - FAISS vector index directory
+        Deletes all files and database state for a document.
 
         Args:
             doc_id: Document UUID.
@@ -273,13 +273,11 @@ class PDFService:
         doc    = self.load_document(doc_id)
         found  = False
 
-        # Delete uploaded PDF
         if doc and Path(doc.file_path).exists():
             Path(doc.file_path).unlink()
             slog.info("Deleted uploaded PDF")
             found = True
 
-        # Delete vector index
         if doc and doc.vector_index_path:
             idx_path = Path(doc.vector_index_path)
             if idx_path.exists():
@@ -288,12 +286,16 @@ class PDFService:
                 else:
                     idx_path.unlink()
                 slog.info("Deleted vector index")
+                found = True
 
-        # Delete state JSON
+        if self.repository.delete_document(doc_id):
+            slog.info("Deleted document record from database")
+            found = True
+
         state_path = self._state_path(doc_id)
         if state_path.exists():
             state_path.unlink()
-            slog.info("Deleted state file")
+            slog.info("Deleted legacy state file")
             found = True
 
         return found
@@ -310,8 +312,8 @@ class PDFService:
         )
 
     def document_exists(self, doc_id: str) -> bool:
-        """Returns True if state file exists for this doc_id."""
-        return self._state_path(doc_id).exists()
+        """Returns True if the document exists in the database or legacy state file."""
+        return self.repository.get_document_by_doc_id(doc_id) is not None or self._state_path(doc_id).exists()
 
     def is_ready(self, doc_id: str) -> bool:
         """Returns True if document is fully processed and ready for chat."""

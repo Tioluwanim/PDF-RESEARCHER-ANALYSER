@@ -11,8 +11,10 @@ A production-ready system for uploading research PDFs, detecting sections, and c
 - **Section Detection** — Abstract, Introduction, Methods, Results, Discussion, Conclusion, References
 - **Intelligent Chunking** — section-aware sliding window with overlap
 - **Embeddings** — sentence-transformers (`all-MiniLM-L6-v2`), runs locally
-- **Vector Store** — FAISS per-document index, persisted to disk
-- **Semantic Search** — cosine similarity over document chunks
+- **Database-backed library** - SQLAlchemy ORM with Alembic migrations; SQLite locally and PostgreSQL on Render
+- **Google Drive Sync** - service-account folder sync with idempotent new/changed PDF detection
+- **Vector Store** — FAISS shared library index with DB chunk metadata and source attribution
+- **Semantic Search** — cosine similarity over the full library or an individual document
 - **Chat with PDF** — streaming RAG-powered chat with conversation history
 - **LLM Routing** — OpenRouter (primary) → HuggingFace (automatic fallback)
 - **Retry Logic** — exponential backoff on all API calls
@@ -27,13 +29,19 @@ pdf_analyzer/
 ├── app/
 │   ├── main.py                  ← Streamlit UI
 │   ├── config.py                ← All settings (env vars)
+│   ├── db/
+│   │   ├── models.py           ← SQLAlchemy ORM tables
+│   │   ├── repository.py       ← database persistence boundary
+│   │   └── session.py          ← engine/session setup
 │   ├── models/
 │   │   └── schemas.py           ← Pydantic data models
 │   ├── services/
 │   │   ├── pdf_service.py       ← Upload, storage, state
 │   │   ├── extraction_service.py← Text extraction + chunking
 │   │   ├── embedding_service.py ← sentence-transformers
-│   │   ├── rag_service.py       ← FAISS vector store + search
+│   │   ├── drive_service.py     ← Google Drive folder sync
+│   │   ├── ingestion_service.py ← queued ingestion jobs
+│   │   ├── rag_service.py       ← shared FAISS library index + search
 │   │   ├── analysis_service.py  ← Pipeline orchestrator
 │   │   └── ai_router.py         ← OpenRouter + HuggingFace + streaming
 │   └── utils/
@@ -41,8 +49,9 @@ pdf_analyzer/
 │       └── retry.py             ← Retry + exponential backoff
 ├── data/
 │   ├── uploads/                 ← Saved PDFs
-│   ├── processed/               ← Document state JSON files
-│   └── vectorstore/             ← FAISS indexes per document
+│   ├── processed/               ← legacy JSON fallback only
+│   └── vectorstore/             ← FAISS indexes and shared library index
+├── alembic/                     ← database migrations
 ├── logs/                        ← Daily log files (auto-created)
 ├── .env                         ← Environment variables
 ├── requirements.txt
@@ -77,7 +86,7 @@ pip install -r requirements.txt
 ### 3. Configure environment variables
 
 ```bash
-cp .env .env.local   # optional — edit .env directly
+cp .env.example .env
 ```
 
 Open `.env` and fill in your API keys:
@@ -92,7 +101,17 @@ HUGGINGFACE_API_KEY=your_huggingface_key_here
 
 The app works with just one key — the other is the fallback.
 
-### 4. Run
+### 4. Prepare the database
+
+Local development defaults to SQLite at `data/pdf_analyzer.db`. Render should use the managed PostgreSQL `DATABASE_URL`.
+
+```bash
+alembic upgrade head
+```
+
+The app also calls `init_db()` at startup as a local convenience, but Alembic is the production path.
+
+### 5. Run
 
 ```bash
 python run.py
@@ -104,17 +123,43 @@ Then open **http://localhost:8501** in your browser.
 
 ## Usage
 
-1. **Upload** a PDF using the sidebar uploader
+1. **Upload** a PDF using the sidebar uploader, or configure Google Drive and run **Sync**
 2. The system automatically:
    - Extracts text from all pages
    - Detects sections (Abstract, Methods, Results etc.)
    - Chunks text with overlap
    - Generates embeddings (local, no API cost)
+   - Stores chunk metadata and embeddings in the database
+   - Builds a shared FAISS library index
    - Builds and saves a FAISS vector index
 3. **Chat** — ask questions in the Chat tab, get streaming answers with source context
 4. **Sections** — browse detected sections directly
 5. **Search** — run semantic search and see matching chunks with similarity scores
 6. **Info** — view metadata, section stats, and index details
+
+---
+
+## Configuration Reference
+
+## Google Drive Sync
+
+Use a Google service account:
+
+1. Enable the Google Drive API in Google Cloud.
+2. Create a service account and download the JSON credential file.
+3. Share the target Drive folder with the service account email.
+4. Set `GOOGLE_DRIVE_FOLDER_ID` and `GOOGLE_CREDENTIALS_PATH`.
+
+Sync is idempotent: the app compares Drive file ID plus checksum/modified time, downloads only new or changed PDFs, records a `sync_runs` row, queues `ingestion_jobs`, and processes the changed documents.
+
+## Render Deployment
+
+1. Create a Render PostgreSQL database.
+2. Set `DATABASE_URL` to Render's internal PostgreSQL URL.
+3. Add the API keys and Drive settings as Render environment variables or secrets.
+4. Use `pip install -r requirements.txt` as the build command.
+5. Run `alembic upgrade head` before starting the web service.
+6. Start with `streamlit run streamlit_app.py --server.address 0.0.0.0 --server.port $PORT`.
 
 ---
 

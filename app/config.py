@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 # ── Paths (resolved before .env load) ────────────────────────────────────────
@@ -20,7 +21,7 @@ LOGS_DIR        = BASE_DIR / "logs"
 
 # ── Load .env (local development) ────────────────────────────────────────────
 _env_path = BASE_DIR / ".env"
-load_dotenv(dotenv_path=_env_path, override=True)
+load_dotenv(dotenv_path=_env_path, override=False)
 
 # ── Load Streamlit secrets (Cloud deployment) ─────────────────────────────────
 try:
@@ -44,6 +45,19 @@ APP_TITLE   = os.getenv("APP_TITLE",   "PDF Research Analyzer")
 APP_VERSION = os.getenv("APP_VERSION", "1.0.0")
 DEBUG       = os.getenv("DEBUG", "false").lower() == "true"
 LOG_LEVEL   = os.getenv("LOG_LEVEL",   "INFO").upper()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Database
+DATABASE_URL    = os.getenv(
+    "DATABASE_URL",
+    f"sqlite:///{BASE_DIR / 'data' / 'pdf_analyzer.db'}",
+)
+SQLALCHEMY_ECHO = os.getenv("SQLALCHEMY_ECHO", "false").lower() == "true"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Google Drive
+GOOGLE_DRIVE_FOLDER_ID   = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "").strip()
+GOOGLE_CREDENTIALS_PATH  = os.getenv("GOOGLE_CREDENTIALS_PATH", "credentials.json")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # OpenRouter  (Primary LLM)
@@ -127,7 +141,7 @@ ALLOWED_EXTENSIONS  = {".pdf", ".docx", ".doc", ".txt", ".xlsx", ".xls", ".csv"}
 # ─────────────────────────────────────────────────────────────────────────────
 STREAMLIT_PAGE_TITLE = APP_TITLE
 STREAMLIT_PAGE_ICON  = "📄"
-STREAMLIT_LAYOUT     = "wide"
+STREAMLIT_LAYOUT     = os.getenv("STREAMLIT_LAYOUT", "wide")
 MAX_CHAT_HISTORY     = int(os.getenv("MAX_CHAT_HISTORY", "50"))
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -181,6 +195,11 @@ def validate_config() -> list[str]:
             f"CHUNK_OVERLAP ({CHUNK_OVERLAP}) must be less than CHUNK_SIZE ({CHUNK_SIZE})."
         )
 
+    if GOOGLE_DRIVE_FOLDER_ID and not Path(GOOGLE_CREDENTIALS_PATH).exists():
+        issues.append(
+            "GOOGLE_DRIVE_FOLDER_ID is set, but GOOGLE_CREDENTIALS_PATH does not point to a file."
+        )
+
     return issues
 
 
@@ -205,4 +224,6 @@ def get_config_summary() -> dict:
         "upload_dir"            : str(UPLOAD_DIR),
         "processed_dir"         : str(PROCESSED_DIR),
         "vectorstore_dir"       : str(VECTORSTORE_DIR),
+        "database_url_configured": bool(DATABASE_URL),
+        "google_drive_configured": bool(GOOGLE_DRIVE_FOLDER_ID),
     }

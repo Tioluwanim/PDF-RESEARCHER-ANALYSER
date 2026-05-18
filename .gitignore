@@ -1,0 +1,15 @@
+.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+data/uploads/
+data/processed/
+data/vectorstore/
+data/*.db
+logs/*.log
+
+.streamlit/secrets.toml
+credentials.json
