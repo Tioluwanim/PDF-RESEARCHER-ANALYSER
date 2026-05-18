@@ -5,9 +5,10 @@ All settings loaded from environment variables with validated defaults.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from dotenv import load_dotenv
 
@@ -52,21 +53,103 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _resolved_path(path_value: str) -> Path:
+    path = Path(path_value)
+    return path if path.is_absolute() else BASE_DIR / path
+
+
+def _load_streamlit_secrets_into_env() -> None:
+    """
+    Load flat Streamlit secrets into environment variables.
+    Nested sections are ignored here and handled separately.
+    """
+    try:
+        import streamlit as st  # type: ignore
+    except Exception:
+        return
+
+    secrets_obj: Any = getattr(st, "secrets", None)
+    if not secrets_obj:
+        return
+
+    try:
+        for key in secrets_obj.keys():
+            value = secrets_obj[key]
+            if isinstance(value, str) and key not in os.environ:
+                os.environ[key] = value
+    except Exception:
+        return
+
+
+def _get_streamlit_secret_section(name: str) -> dict[str, Any] | None:
+    """
+    Return a nested Streamlit secrets section as a plain dict.
+    Example: [gcp_service_account] in secrets.toml
+    """
+    try:
+        import streamlit as st  # type: ignore
+    except Exception:
+        return None
+
+    secrets_obj: Any = getattr(st, "secrets", None)
+    if not secrets_obj:
+        return None
+
+    try:
+        section = secrets_obj[name]
+    except Exception:
+        return None
+
+    if isinstance(section, Mapping):
+        return dict(section)
+
+    return None
+
+
+def _write_json_file(path: Path, data: Mapping[str, Any]) -> bool:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(dict(data), f, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+def _materialize_google_credentials_file() -> None:
+    """
+    Recreate credentials.json from Streamlit secrets if it does not exist.
+
+    Supported sources:
+    1. GOOGLE_CREDENTIALS_JSON env var containing the full JSON string
+    2. A Streamlit secrets section, default name: [gcp_service_account]
+    """
+    cred_path = _resolved_path(GOOGLE_CREDENTIALS_PATH)
+    if cred_path.exists():
+        return
+
+    raw_json = _env_str("GOOGLE_CREDENTIALS_JSON", "")
+    if raw_json:
+        try:
+            parsed = json.loads(raw_json)
+        except json.JSONDecodeError:
+            parsed = None
+
+        if isinstance(parsed, dict):
+            _write_json_file(cred_path, parsed)
+            return
+
+    secret_section = _get_streamlit_secret_section(GOOGLE_CREDENTIALS_SECRET_SECTION)
+    if secret_section:
+        _write_json_file(cred_path, secret_section)
+
+
 # ── Load .env ────────────────────────────────────────────────────────────────
 _env_path = BASE_DIR / ".env"
 load_dotenv(dotenv_path=_env_path, override=False)
 
 # ── Load Streamlit secrets (Cloud deployment) ────────────────────────────────
-try:
-    import streamlit as st  # type: ignore
-
-    secrets_obj: Any = getattr(st, "secrets", None)
-    if secrets_obj:
-        for key, value in secrets_obj.items():
-            if isinstance(value, str) and key not in os.environ:
-                os.environ[key] = value
-except Exception:
-    pass
+_load_streamlit_secrets_into_env()
 
 # ── Ensure directories exist ────────────────────────────────────────────────
 for _dir in (UPLOAD_DIR, PROCESSED_DIR, VECTORSTORE_DIR, LOGS_DIR):
@@ -94,12 +177,20 @@ SQLALCHEMY_ECHO = _env_bool("SQLALCHEMY_ECHO", False)
 # ─────────────────────────────────────────────────────────────────────────────
 GOOGLE_DRIVE_FOLDER_ID = _env_str("GOOGLE_DRIVE_FOLDER_ID", "")
 GOOGLE_CREDENTIALS_PATH = _env_str("GOOGLE_CREDENTIALS_PATH", "credentials.json")
+GOOGLE_CREDENTIALS_SECRET_SECTION = _env_str(
+    "GOOGLE_CREDENTIALS_SECRET_SECTION",
+    "gcp_service_account",
+)
+GOOGLE_CREDENTIALS_JSON = _env_str("GOOGLE_CREDENTIALS_JSON", "")
+
+# Recreate the credentials file locally/cloud if possible
+_materialize_google_credentials_file()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # OpenRouter (Primary LLM)
 # ─────────────────────────────────────────────────────────────────────────────
 OPENROUTER_API_KEY = _env_str("OPENROUTER_API_KEY", "")
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_BASE_URL = _env_str("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 OPENROUTER_MODEL = _env_str("OPENROUTER_MODEL", "openrouter/free")
 OPENROUTER_TIMEOUT = _env_int("OPENROUTER_TIMEOUT", 90)
 OPENROUTER_RATE_LIMIT_DELAY = _env_float("OPENROUTER_RATE_LIMIT_DELAY", 10.0)
@@ -108,7 +199,7 @@ OPENROUTER_RATE_LIMIT_DELAY = _env_float("OPENROUTER_RATE_LIMIT_DELAY", 10.0)
 # HuggingFace (Fallback LLM)
 # ─────────────────────────────────────────────────────────────────────────────
 HUGGINGFACE_API_KEY = _env_str("HUGGINGFACE_API_KEY", "")
-HUGGINGFACE_BASE_URL = "https://router.huggingface.co/v1"
+HUGGINGFACE_BASE_URL = _env_str("HUGGINGFACE_BASE_URL", "https://router.huggingface.co/v1")
 HUGGINGFACE_MODEL = _env_str(
     "HUGGINGFACE_MODEL",
     "meta-llama/Llama-3.1-8B-Instruct:cerebras",
@@ -243,10 +334,13 @@ def validate_config() -> list[str]:
             f"CHUNK_OVERLAP ({CHUNK_OVERLAP}) must be less than CHUNK_SIZE ({CHUNK_SIZE})."
         )
 
-    if GOOGLE_DRIVE_FOLDER_ID and not Path(GOOGLE_CREDENTIALS_PATH).exists():
-        issues.append(
-            "GOOGLE_DRIVE_FOLDER_ID is set, but GOOGLE_CREDENTIALS_PATH does not point to a file."
-        )
+    if GOOGLE_DRIVE_FOLDER_ID:
+        cred_path = _resolved_path(GOOGLE_CREDENTIALS_PATH)
+        if not cred_path.exists():
+            issues.append(
+                "GOOGLE_DRIVE_FOLDER_ID is set, but GOOGLE_CREDENTIALS_PATH does not point to a file "
+                "and no Streamlit secret section was materialized."
+            )
 
     return issues
 
@@ -274,4 +368,5 @@ def get_config_summary() -> dict:
         "vectorstore_dir": str(VECTORSTORE_DIR),
         "database_url_configured": bool(DATABASE_URL),
         "google_drive_configured": bool(GOOGLE_DRIVE_FOLDER_ID),
+        "google_credentials_path": str(_resolved_path(GOOGLE_CREDENTIALS_PATH)),
     }
