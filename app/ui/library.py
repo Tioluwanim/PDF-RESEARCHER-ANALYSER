@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import os
 
 import streamlit as st
 
@@ -99,23 +100,39 @@ def _render_sync() -> None:
     with c1:
         st.markdown("**Google Drive ingestion**")
         if drive_service.is_configured:
-            st.caption(f"Configured folder: {drive_service.folder_id}")
+            st.success(f"✓ Connected — folder: `{drive_service.folder_id}`", icon="📁")
         else:
-            # is_configured re-reads env/files at call time, so this only
-            # shows when config is genuinely absent — not a false positive.
-            missing = []
-            import os
-            if not os.getenv("GOOGLE_DRIVE_FOLDER_ID", "").strip():
-                missing.append("GOOGLE_DRIVE_FOLDER_ID")
-            if not os.getenv("GOOGLE_CREDENTIALS_PATH", "") or not __import__("pathlib").Path(
-                os.getenv("GOOGLE_CREDENTIALS_PATH", "credentials.json")
-            ).exists():
-                missing.append("credentials.json (GOOGLE_CREDENTIALS_PATH)")
-            if missing:
+            folder_id_set = bool(os.getenv("GOOGLE_DRIVE_FOLDER_ID", "").strip())
+            if not folder_id_set:
                 st.info(
-                    "Google Drive sync is not yet configured. "
-                    f"Missing: {', '.join(missing)}. "
-                    "Add them to your .env file or Streamlit secrets."
+                    "Google Drive sync is not configured. "
+                    "Paste your Drive folder URL or ID below, then add "
+                    "`credentials.json` (GCP service account) to the project root "
+                    "or set `[gcp_service_account]` in Streamlit secrets.",
+                    icon="📁",
+                )
+                folder_input = st.text_input(
+                    "Drive folder URL or ID",
+                    placeholder="https://drive.google.com/drive/folders/… or bare folder ID",
+                    key="library_drive_folder_input",
+                )
+                if st.button("Save folder ID", key="library_drive_folder_save"):
+                    raw = (folder_input or "").strip()
+                    if raw:
+                        drive_service.set_folder_id(raw)
+                        st.success(
+                            "Folder ID saved. Once credentials.json is in place, "
+                            "click **Sync Drive** below."
+                        )
+                        st.rerun()
+                    else:
+                        st.warning("Please enter a folder URL or ID.")
+            else:
+                st.warning(
+                    "GOOGLE_DRIVE_FOLDER_ID is set but **credentials.json** is missing. "
+                    "Upload your GCP service-account JSON to the project root, or add "
+                    "it under `[gcp_service_account]` in Streamlit secrets.",
+                    icon="🔑",
                 )
     with c2:
         if st.button("Rebuild library index", use_container_width=True, key="library_rebuild_index"):
