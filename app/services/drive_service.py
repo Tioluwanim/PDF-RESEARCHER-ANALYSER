@@ -137,6 +137,8 @@ class DriveService:
                             fields="nextPageToken, files(id, name, mimeType, modifiedTime, md5Checksum, size)",
                             pageSize=200,
                             pageToken=page_token,
+                            includeItemsFromAllDrives=True,
+                            supportsAllDrives=True,
                         )
                         .execute()
                     )
@@ -272,7 +274,11 @@ class DriveService:
             logger.warning(message)
             return {"error": message}
         try:
-            f = svc.files().get(fileId=folder_id, fields="name,id,modifiedTime").execute()
+            f = svc.files().get(
+                fileId=folder_id,
+                fields="name,id,modifiedTime",
+                supportsAllDrives=True,
+            ).execute()
             return f
         except Exception as e:
             message = str(e)
@@ -313,9 +319,13 @@ class DriveService:
 
         svc = self._get_service()
         if mime_type and mime_type.startswith("application/vnd.google-apps."):
-            request = svc.files().export(fileId=file_id, mimeType="application/pdf")
+            request = svc.files().export(
+                fileId=file_id,
+                mimeType="application/pdf",
+                supportsAllDrives=True,
+            )
         else:
-            request = svc.files().get_media(fileId=file_id)
+            request = svc.files().get_media(fileId=file_id, supportsAllDrives=True)
 
         buf = io.BytesIO()
         downloader = MediaIoBaseDownload(buf, request, chunksize=4 * 1024 * 1024)
