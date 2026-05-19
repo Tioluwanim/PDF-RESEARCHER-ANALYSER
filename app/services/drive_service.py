@@ -3,7 +3,7 @@ drive_service.py - Google Drive folder sync for library PDF ingestion.
 
 OAuth-first design:
 - Uses Google OAuth web application credentials.
-- Automatically reads/writes OAuth client JSON from Streamlit secrets/env.
+- Reads OAuth client JSON materialised by app/config.py from Streamlit secrets/env.
 - Persists the OAuth token locally after the first sign-in.
 - Falls back to service-account auth if a credentials JSON is present.
 
@@ -30,6 +30,7 @@ from app.config import (
     GOOGLE_OAUTH_CLIENT_PATH,
     GOOGLE_OAUTH_TOKEN_PATH,
     GOOGLE_OAUTH_REDIRECT_URI,
+    is_drive_sync_configured,
 )
 from app.db.repository import repository
 from app.models.schemas import DocumentStatus
@@ -74,10 +75,11 @@ class DriveService:
 
     Required:
     - GOOGLE_DRIVE_FOLDER_ID
-    - GOOGLE_OAUTH_CLIENT_PATH (or GOOGLE_OAUTH_CLIENT_JSON in secrets/env)
-    - GOOGLE_OAUTH_REDIRECT_URI
-      OR
-    - GOOGLE_CREDENTIALS_PATH for service-account fallback
+    - ONE of:
+        - GOOGLE_OAUTH_CLIENT_PATH / GOOGLE_OAUTH_CLIENT_JSON
+        - GOOGLE_OAUTH_TOKEN_PATH (after first OAuth login)
+        - GOOGLE_CREDENTIALS_PATH for service-account fallback
+    - GOOGLE_OAUTH_REDIRECT_URI for OAuth web-app flow
     """
 
     def __init__(self) -> None:
@@ -131,13 +133,14 @@ class DriveService:
 
     @property
     def is_configured(self) -> bool:
-        """
-        True when there is enough Drive config for the UI to consider the
-        integration available.
-        """
         folder = self._get_folder_id()
         if not folder:
             return False
+
+        # Delegate final configuration truth to config helper, but keep
+        # this method independent enough for runtime checks.
+        if is_drive_sync_configured():
+            return True
 
         return any(
             (
@@ -470,7 +473,6 @@ class DriveService:
                     on_file_found(name, idx + 1, len(files))
 
                 existing = repository.get_document_by_drive_file_id(file_id)
-
                 existing_doc_id = getattr(existing, "doc_id", None) if existing is not None else None
                 existing_pk = getattr(existing, "id", None) if existing is not None else None
                 existing_checksum = getattr(existing, "checksum", None) if existing is not None else None
@@ -554,6 +556,7 @@ class DriveService:
                 sync_run=sync_run,
                 status="completed",
                 new_files=result["new"],
+                updated_files=result["updated"],
                 skipped_files=result["skipped"],
                 failed_files=result["failed"],
             )
