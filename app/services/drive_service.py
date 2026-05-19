@@ -34,6 +34,9 @@ SUPPORTED_DRIVE_MIME_TYPES = [
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "application/vnd.ms-excel",
     "text/csv",
+    "application/vnd.google-apps.document",
+    "application/vnd.google-apps.spreadsheet",
+    "application/vnd.google-apps.presentation",
 ]
 FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 
@@ -195,8 +198,8 @@ class DriveService:
 
             ingestion_job = None
             try:
-                file_bytes = self._download_file(file_id)
-                file_bytes, output_name = self._ensure_pdf_for_sync(file_bytes, name)
+                file_bytes = self._download_file(file_id, f.get("mimeType"))
+                file_bytes, output_name = self._ensure_pdf_for_sync(file_bytes, name, f.get("mimeType"))
                 safe_name = self._sanitize_filename(output_name)
                 dest_path = self.upload_dir / f"{file_id}_{safe_name}"
                 dest_path.write_bytes(file_bytes)
@@ -302,11 +305,15 @@ class DriveService:
             logger.error("Drive auth failed: %s", e)
             return None
 
-    def _download_file(self, file_id: str) -> bytes:
+    def _download_file(self, file_id: str, mime_type: str | None) -> bytes:
         from googleapiclient.http import MediaIoBaseDownload
 
         svc = self._get_service()
-        request = svc.files().get_media(fileId=file_id)
+        if mime_type and mime_type.startswith("application/vnd.google-apps."):
+            request = svc.files().export(fileId=file_id, mimeType="application/pdf")
+        else:
+            request = svc.files().get_media(fileId=file_id)
+
         buf = io.BytesIO()
         downloader = MediaIoBaseDownload(buf, request, chunksize=4 * 1024 * 1024)
         done = False
@@ -314,11 +321,20 @@ class DriveService:
             _, done = downloader.next_chunk()
         return buf.getvalue()
 
-    def _ensure_pdf_for_sync(self, file_bytes: bytes, filename: str) -> tuple[bytes, str]:
+    def _ensure_pdf_for_sync(
+        self,
+        file_bytes: bytes,
+        filename: str,
+        mime_type: str | None = None,
+    ) -> tuple[bytes, str]:
         """Convert supported non-PDF Drive files to PDF before saving locally."""
         suffix = Path(filename).suffix.lower()
         if suffix == ".pdf":
             return file_bytes, filename
+
+        if mime_type and mime_type.startswith("application/vnd.google-apps."):
+            output_name = f"{Path(filename).stem}.pdf"
+            return file_bytes, output_name
 
         from app.services.pdf_service import pdf_service
 
