@@ -1,6 +1,7 @@
 """
 drive_service.py - Google Drive folder sync for library PDF ingestion.
-Watches a shared Drive folder and downloads new/changed PDFs automatically.
+Watches a shared Drive folder and downloads new/changed supported documents automatically.
+Supports PDF, DOCX, DOC, TXT, XLSX, XLS, and CSV files.
 """
 
 from __future__ import annotations
@@ -24,6 +25,17 @@ from app.models.schemas import (
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+SUPPORTED_DRIVE_MIME_TYPES = [
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/msword",
+    "text/plain",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-excel",
+    "text/csv",
+]
+FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 
 
 class DriveService:
@@ -100,22 +112,43 @@ class DriveService:
         os.environ["GOOGLE_CREDENTIALS_PATH"] = path
 
     def list_drive_files(self) -> list[dict]:
-        """List all PDFs in the configured Drive folder."""
+        """List all supported files in the configured Drive folder, including nested folders."""
         svc = self._get_service()
         folder_id = self._get_folder_id()
         if not svc or not folder_id:
             return []
+
+        mime_clauses = " or ".join(
+            f"mimeType='{mime_type}'" for mime_type in SUPPORTED_DRIVE_MIME_TYPES + [FOLDER_MIME_TYPE]
+        )
+        files: list[dict] = []
+        folders = [folder_id]
+
         try:
-            results = (
-                svc.files()
-                .list(
-                    q=f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false",
-                    fields="files(id, name, modifiedTime, md5Checksum, size)",
-                    pageSize=200,
-                )
-                .execute()
-            )
-            return results.get("files", [])
+            while folders:
+                parent_id = folders.pop(0)
+                page_token = None
+                while True:
+                    query = f"'{parent_id}' in parents and trashed=false and ({mime_clauses})"
+                    response = (
+                        svc.files()
+                        .list(
+                            q=query,
+                            fields="nextPageToken, files(id, name, mimeType, modifiedTime, md5Checksum, size)",
+                            pageSize=200,
+                            pageToken=page_token,
+                        )
+                        .execute()
+                    )
+                    for item in response.get("files", []):
+                        if item.get("mimeType") == FOLDER_MIME_TYPE:
+                            folders.append(item["id"])
+                        else:
+                            files.append(item)
+                    page_token = response.get("nextPageToken")
+                    if not page_token:
+                        break
+            return files
         except Exception as e:
             logger.error("Drive list failed: %s", e)
             return []
@@ -163,7 +196,8 @@ class DriveService:
             ingestion_job = None
             try:
                 file_bytes = self._download_file(file_id)
-                safe_name = self._sanitize_filename(name)
+                file_bytes, output_name = self._ensure_pdf_for_sync(file_bytes, name)
+                safe_name = self._sanitize_filename(output_name)
                 dest_path = self.upload_dir / f"{file_id}_{safe_name}"
                 dest_path.write_bytes(file_bytes)
 
@@ -174,7 +208,7 @@ class DriveService:
                         local_path=str(dest_path),
                         checksum=md5,
                         modified_time=modified_time,
-                        file_size_bytes=size,
+                        file_size_bytes=len(file_bytes),
                         status=DocumentStatus.UPLOADED,
                     )
                     document_id = existing.id
@@ -183,7 +217,7 @@ class DriveService:
                         doc_id=str(uuid.uuid4()),
                         filename=name,
                         local_path=str(dest_path),
-                        file_size_bytes=size,
+                        file_size_bytes=len(file_bytes),
                         mime_type="application/pdf",
                         source_folder=self._get_folder_id(),
                         drive_file_id=file_id,
@@ -279,6 +313,19 @@ class DriveService:
         while not done:
             _, done = downloader.next_chunk()
         return buf.getvalue()
+
+    def _ensure_pdf_for_sync(self, file_bytes: bytes, filename: str) -> tuple[bytes, str]:
+        """Convert supported non-PDF Drive files to PDF before saving locally."""
+        suffix = Path(filename).suffix.lower()
+        if suffix == ".pdf":
+            return file_bytes, filename
+
+        from app.services.pdf_service import pdf_service
+
+        try:
+            return pdf_service.convert_to_pdf_bytes(file_bytes=file_bytes, filename=filename)
+        except Exception as e:
+            raise RuntimeError(f"Drive file conversion failed for '{filename}': {e}") from e
 
     @staticmethod
     def _parse_folder_id(raw_value: str | None) -> str | None:

@@ -175,6 +175,51 @@ class PDFService:
         slog.info(f"Document record created — status={doc.status.value}")
         return doc, None
 
+    def convert_to_pdf_bytes(
+        self,
+        file_bytes: bytes,
+        filename: str,
+    ) -> tuple[bytes, str]:
+        """
+        Convert a supported non-PDF document to PDF bytes.
+
+        Returns:
+            A tuple of (pdf_bytes, output_filename).
+        """
+        suffix = Path(filename).suffix.lower()
+        if suffix == ".pdf":
+            return file_bytes, filename
+
+        text = _extract_text_from_file(file_bytes, suffix, filename)
+        if not text.strip():
+            raise RuntimeError(f"Could not extract text from '{filename}'.")
+
+        import fitz
+
+        pdf_doc = fitz.open()
+        page = pdf_doc.new_page()
+        page.insert_textbox(
+            fitz.Rect(50, 50, 562, 792),
+            text,
+            fontsize=9,
+            fontname="helv",
+            align=0,
+        )
+        if len(text) > 4000:
+            chunks = [text[i:i+4000] for i in range(4000, len(text), 4000)]
+            for chunk in chunks:
+                pg = pdf_doc.new_page()
+                pg.insert_textbox(
+                    fitz.Rect(50, 50, 562, 792),
+                    chunk,
+                    fontsize=9,
+                    fontname="helv",
+                    align=0,
+                )
+        pdf_bytes = pdf_doc.tobytes()
+        pdf_doc.close()
+        return pdf_bytes, Path(filename).stem + ".pdf"
+
     # ── Load / Save State ─────────────────────────────────────────────────────
 
     def load_document(self, doc_id: str) -> ProcessedDocument | None:

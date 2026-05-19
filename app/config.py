@@ -128,10 +128,40 @@ def _load_streamlit_secrets_into_env() -> None:
         for key in secrets.keys():
             try:
                 value = secrets[key]
-                if isinstance(value, str):
-                    os.environ.setdefault(key, value)
+                if isinstance(value, str) and value.strip():
+                    existing = os.getenv(key)
+                    if not existing or not existing.strip():
+                        os.environ[key] = value
             except Exception:
                 pass
+
+        # Pass 1b: scan nested sections for known provider keys
+        _KNOWN_SECRET_KEYS = {
+            "OPENROUTER_API_KEY",
+            "HUGGINGFACE_API_KEY",
+            "HUGGINGFACE_BASE_URL",
+            "HUGGINGFACE_MODEL",
+            "OPENROUTER_BASE_URL",
+            "OPENROUTER_MODEL",
+            "OPENROUTER_TIMEOUT",
+            "HUGGINGFACE_TIMEOUT",
+            "OPENROUTER_RATE_LIMIT_DELAY",
+            "GOOGLE_DRIVE_FOLDER_ID",
+            "GOOGLE_CREDENTIALS_PATH",
+        }
+
+        def _load_known_secret_keys(item: Any) -> None:
+            if not isinstance(item, Mapping):
+                return
+            for key, value in item.items():
+                if isinstance(value, str) and key in _KNOWN_SECRET_KEYS and value.strip():
+                    existing = os.getenv(key)
+                    if not existing or not existing.strip():
+                        os.environ[key] = value
+                elif isinstance(value, Mapping):
+                    _load_known_secret_keys(value)
+
+        _load_known_secret_keys(secrets)
 
         # Pass 2: look for a GCP service-account section and materialise JSON
         _GCP_SECTIONS = (
@@ -152,14 +182,16 @@ def _load_streamlit_secrets_into_env() -> None:
                 cred_path = BASE_DIR / "credentials.json"
                 if not cred_path.exists():
                     _write_json_file(cred_path, dict(section))
-                os.environ.setdefault("GOOGLE_CREDENTIALS_PATH", str(cred_path))
+                existing = os.getenv("GOOGLE_CREDENTIALS_PATH")
+                if not existing or not existing.strip():
+                    os.environ["GOOGLE_CREDENTIALS_PATH"] = str(cred_path)
                 break
             except (KeyError, Exception):
                 continue
 
         # Pass 3: surface GOOGLE_DRIVE_FOLDER_ID from optional sub-section
         _DRIVE_KEY = "GOOGLE_DRIVE_FOLDER_ID"
-        if not os.environ.get(_DRIVE_KEY):
+        if not os.getenv(_DRIVE_KEY) or not os.getenv(_DRIVE_KEY).strip():
             for _sec in ("google_drive", "GOOGLE_DRIVE", "drive"):
                 try:
                     section = (
@@ -170,8 +202,8 @@ def _load_streamlit_secrets_into_env() -> None:
                     if section is None or not isinstance(section, Mapping):
                         continue
                     fid = section.get(_DRIVE_KEY) or section.get("folder_id")
-                    if fid and isinstance(fid, str):
-                        os.environ.setdefault(_DRIVE_KEY, fid)
+                    if fid and isinstance(fid, str) and fid.strip():
+                        os.environ[_DRIVE_KEY] = fid
                         break
                 except (KeyError, Exception):
                     continue
@@ -734,9 +766,9 @@ def validate_config() -> list[str]:
 
     issues: list[str] = []
 
-    if not OPENROUTER_API_KEY:
+    if not OPENROUTER_API_KEY and not HUGGINGFACE_API_KEY:
         issues.append(
-            "OPENROUTER_API_KEY missing"
+            "No LLM provider configured. Set OPENROUTER_API_KEY or HUGGINGFACE_API_KEY."
         )
 
     if CHUNK_OVERLAP >= CHUNK_SIZE:
