@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import html
-import os
 
 import streamlit as st
 
@@ -81,7 +80,7 @@ def _render_catalog() -> None:
                 "Error": doc.get("last_error") or "",
             }
         )
-    st.dataframe(rows, use_container_width=True, hide_index=True)
+    st.dataframe(rows, width="stretch", hide_index=True)
 
     selected = st.selectbox(
         "Open document",
@@ -96,57 +95,85 @@ def _render_catalog() -> None:
 
 
 def _render_sync() -> None:
+    # ── Folder URL input (user provides their own Drive folder) ──────────────
+    creds_ok = drive_service._get_creds_path() and __import__("pathlib").Path(
+        drive_service._get_creds_path()
+    ).exists()
+
+    if not creds_ok:
+        st.warning(
+            "⚠️ Google Drive credentials are not configured. "
+            "Ask your administrator to add the service account credentials to Streamlit secrets.",
+            icon="🔑",
+        )
+
+    current_folder = drive_service.folder_id or ""
+    col_url, col_save = st.columns([5, 1])
+    with col_url:
+        folder_url = st.text_input(
+            "Google Drive folder URL",
+            value=current_folder,
+            placeholder="https://drive.google.com/drive/folders/1BxiMVs0XRA5...",
+            help="Paste the URL of the shared Drive folder containing your library PDFs.",
+            label_visibility="visible",
+            key="drive_folder_url_input",
+        )
+    with col_save:
+        st.markdown("<div style='padding-top:1.85rem;'>", unsafe_allow_html=True)
+        save_clicked = st.button("Save", width="stretch", key="drive_folder_save")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    if save_clicked:
+        if folder_url.strip():
+            drive_service.set_folder_id(folder_url.strip())
+            # Persist to env so is_configured reflects the new value immediately
+            import os
+            parsed = drive_service._get_folder_id()
+            if parsed:
+                os.environ["GOOGLE_DRIVE_FOLDER_ID"] = parsed
+                st.success(f"✓ Folder saved: `{parsed}`")
+            else:
+                st.error("Could not parse a valid folder ID from that URL. Paste the full Drive folder URL.")
+        else:
+            st.warning("Please paste a Google Drive folder URL first.")
+
+    if drive_service.is_configured:
+        st.caption(f"✓ Ready to sync — folder: `{drive_service.folder_id}`")
+    elif creds_ok and not current_folder:
+        st.caption("Paste your Drive folder URL above and click Save to enable sync.")
+
+    st.markdown("<hr style='margin:0.75rem 0;'>", unsafe_allow_html=True)
+
     c1, c2 = st.columns([2, 1])
     with c1:
-        st.markdown("**Google Drive ingestion**")
-        if drive_service.is_configured:
-            st.success(f"✓ Connected — folder: `{drive_service.folder_id}`", icon="📁")
-        else:
-            folder_id_set = bool(os.getenv("GOOGLE_DRIVE_FOLDER_ID", "").strip())
-            if not folder_id_set:
-                st.info(
-                    "Google Drive sync is not configured. "
-                    "Paste your Drive folder URL or ID below, then add "
-                    "`credentials.json` (GCP service account) to the project root "
-                    "or set `[gcp_service_account]` in Streamlit secrets.",
-                    icon="📁",
-                )
-                folder_input = st.text_input(
-                    "Drive folder URL or ID",
-                    placeholder="https://drive.google.com/drive/folders/… or bare folder ID",
-                    key="library_drive_folder_input",
-                )
-                if st.button("Save folder ID", key="library_drive_folder_save"):
-                    raw = (folder_input or "").strip()
-                    if raw:
-                        drive_service.set_folder_id(raw)
-                        st.success(
-                            "Folder ID saved. Once credentials.json is in place, "
-                            "click **Sync Drive** below."
-                        )
-                        st.rerun()
-                    else:
-                        st.warning("Please enter a folder URL or ID.")
-            else:
-                st.warning(
-                    "GOOGLE_DRIVE_FOLDER_ID is set but **credentials.json** is missing. "
-                    "Upload your GCP service-account JSON to the project root, or add "
-                    "it under `[gcp_service_account]` in Streamlit secrets.",
-                    icon="🔑",
-                )
+        pass
     with c2:
-        if st.button("Rebuild library index", use_container_width=True, key="library_rebuild_index"):
+        if st.button("Rebuild library index", width="stretch", key="library_rebuild_index"):
             ok = analysis_service.rebuild_library_index()
             st.success("Library index rebuilt.") if ok else st.warning("No ready embedded chunks found.")
 
-    if st.button("Sync Drive and process changes", type="primary", key="library_drive_sync"):
+    sync_disabled = not drive_service.is_configured
+    if st.button(
+        "Sync Drive and process changes",
+        type="primary",
+        key="library_drive_sync",
+        disabled=sync_disabled,
+        help="Save a Drive folder URL above first." if sync_disabled else None,
+    ):
         progress = st.empty()
 
         def on_file_found(name: str, idx: int, total: int) -> None:
             progress.info(f"Checking {idx}/{total}: {name}")
 
+        def on_job_progress(step: str, pct: int) -> None:
+            progress.info(f"[Ingestion {pct}%] {step}")
+
         result = analysis_service.sync_drive(on_file_found=on_file_found)
-        jobs = analysis_service.process_pending_ingestion_jobs(limit=100)
+        jobs = analysis_service.process_pending_ingestion_jobs(
+            limit=100,
+            on_progress=on_job_progress,
+        )
+        progress.info("Rebuilding library index…")
         analysis_service.rebuild_library_index()
         progress.empty()
         st.success(
@@ -171,7 +198,7 @@ def _render_sync() -> None:
                 }
                 for r in runs
             ],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -294,7 +321,7 @@ def _render_export_readiness() -> None:
                 }
                 for doc in ready
             ],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -304,7 +331,7 @@ def _render_logs() -> None:
     if not rows:
         st.info("No processing logs yet.")
         return
-    st.dataframe(rows, use_container_width=True, hide_index=True)
+    st.dataframe(rows, width="stretch", hide_index=True)
 
 
 def _section_type(value: str) -> SectionType | None:

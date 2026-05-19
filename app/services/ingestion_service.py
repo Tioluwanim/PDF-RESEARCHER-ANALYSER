@@ -9,7 +9,6 @@ from typing import Callable
 
 from app.db.repository import repository
 from app.models.schemas import DocumentStatus
-from app.services.analysis_service import analysis_service
 from app.utils.logger import get_logger, ServiceLogger
 
 logger = get_logger(__name__)
@@ -52,6 +51,8 @@ class IngestionService:
                 message="Document record missing for ingestion job",
             )
             return False
+
+        from app.services.analysis_service import analysis_service
 
         response = analysis_service.process_document(
             doc_id=job.document.doc_id,
