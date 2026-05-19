@@ -1,189 +1,278 @@
+"""
+sidebar.py - Sidebar UI for PDF Research Analyzer.
+
+Responsibilities:
+- App branding / logo block
+- File uploader (single file → triggers handle_upload)
+- Document selector (list all docs, set active_doc_id)
+- Google Drive folder configuration (runtime input + sync button)
+- Cache management (clear active doc, delete all)
+- Provider / API status display
+
+All heavy logic lives in shared.py or the service layer.
+"""
+
 from __future__ import annotations
 
-import html
-import traceback
-from pathlib import Path
+import os
 
 import streamlit as st
-from app.config import MAX_CHAT_HISTORY, PROCESSED_DIR, VECTORSTORE_DIR, UPLOAD_DIR
-from app.models.schemas import ChatMessage, MessageRole
+
 from app.services.analysis_service import analysis_service
-from app.db.repository import repository
+from app.services.drive_service import drive_service
+from app.ui.shared import delete_all_docs, delete_doc_cache, handle_upload
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
-def fmt_number(value: int | float) -> str:
-    try:
-        return f"{value:,}"
-    except Exception:
-        return str(value)
-
-
-def md_to_html(text: str) -> str:
-    """Convert lightweight markdown to safe HTML for chat bubbles."""
-    import re
-    if not text:
-        return ""
-    t = html.escape(text)
-    # Fenced code blocks
-    t = re.sub(
-        r"```(?:\w+\n)?(.*?)```",
-        lambda m: (
-            '<pre style="background:var(--surface);padding:0.7rem 1rem;'
-            'border-radius:6px;font-family:var(--f-mono);'
-            f'font-size:0.8rem;overflow-x:auto;margin:0.5rem 0;">'
-            f'{m.group(1).strip()}</pre>'
-        ),
-        t, flags=re.DOTALL,
-    )
-    t = re.sub(r"`([^`]+)`", r'<code>\1</code>', t)
-    t = re.sub(r"\*\*(.+?)\*\*", r'<strong>\1</strong>', t)
-    t = re.sub(r"\*(.+?)\*", r'<em>\1</em>', t)
-
-    def _bullets(m: re.Match) -> str:
-        items = re.findall(r"^[-•]\s+(.+)$", m.group(0), re.MULTILINE)
-        return "<ul>" + "".join(f"<li>{i}</li>" for i in items) + "</ul>"
-
-    def _nums(m: re.Match) -> str:
-        items = re.findall(r"^\d+\.\s+(.+)$", m.group(0), re.MULTILINE)
-        return "<ol>" + "".join(f"<li>{i}</li>" for i in items) + "</ol>"
-
-    t = re.sub(r"(^[-•]\s+.+$\n?)+", _bullets, t, flags=re.MULTILINE)
-    t = re.sub(r"(^\d+\.\s+.+$\n?)+", _nums, t, flags=re.MULTILINE)
-
-    paragraphs = [p.strip() for p in re.split(r"\n\n+", t) if p.strip()]
-    result = []
-    for p in paragraphs:
-        if p.startswith(("<ul>", "<ol>", "<pre>")):
-            result.append(p)
-        else:
-            result.append(f"<p>{p.replace(chr(10), '<br>')}</p>")
-    return "\n".join(result)
-
-
-def delete_doc_cache(doc_id: str) -> None:
-    try:
-        analysis_service.delete_document(doc_id)
-    except Exception as e:
-        logger.error("Failed to delete document cache %s: %s", doc_id, e)
-
-
-def delete_all_docs() -> None:
-    try:
-        repository.delete_all_documents()
-        import shutil
-        for folder in [PROCESSED_DIR, VECTORSTORE_DIR, UPLOAD_DIR]:
-            p = Path(folder)
-            if p.exists():
-                shutil.rmtree(p, ignore_errors=True)
-            p.mkdir(parents=True, exist_ok=True)
-    except Exception as e:
-        logger.error("Failed to delete all document cache: %s", e)
-
-
-def process_document(doc_id: str) -> None:
-    with st.spinner("Processing document…"):
-        analysis_service.process_document(doc_id, reprocess=True)
-    st.success("Document processing triggered.")
-    st.rerun()
-
-
-def handle_chat(doc_id: str, question: str) -> None:
-    try:
-        st.session_state.chat_history.append(
-            ChatMessage(role=MessageRole.USER, content=question)
-        )
-        if len(st.session_state.chat_history) > MAX_CHAT_HISTORY:
-            st.session_state.chat_history = st.session_state.chat_history[-MAX_CHAT_HISTORY:]
-
-        typing = st.empty()
-        typing.markdown(
-            '<div class="msg-wrap asst">'
-            '<div class="msg-avatar asst">📚</div>'
-            '<div class="typing-indicator">'
-            '<div class="typing-dot"></div>'
-            '<div class="typing-dot"></div>'
-            '<div class="typing-dot"></div>'
-            '</div></div>',
-            unsafe_allow_html=True,
-        )
-
-        container = st.empty()
-        full_reply = ""
-
-        stream = analysis_service.chat_stream(
-            doc_id=doc_id,
-            question=question,
-            history=st.session_state.chat_history[:-1],
-        )
-
-        for token in stream:
-            if not token:
-                continue
-            full_reply += str(token)
-            typing.empty()
-            container.markdown(
-                '<div class="msg-wrap asst">'
-                '<div class="msg-avatar asst">📚</div>'
-                f'<div class="msg-bubble asst">{md_to_html(full_reply)}'
-                f'<span style="color:var(--accent);animation:pulse 1s infinite;">▌</span></div>'
-                '</div>',
-                unsafe_allow_html=True,
-            )
-
-        typing.empty()
-        container.empty()
-
-        st.session_state.chat_history.append(
-            ChatMessage(role=MessageRole.ASSISTANT, content=full_reply or "⚠️ No response received."),
-        )
-        st.rerun()
-
-    except Exception as exc:
-        logger.error("Chat failed: %s\n%s", exc, traceback.format_exc())
-        st.error("⚠️ Chat error. Please try again.")
-        if st.session_state.chat_history and st.session_state.chat_history[-1].role == MessageRole.USER:
-            st.session_state.chat_history.pop()
-
-
-def handle_upload(pdf_file) -> None:
-    try:
-        doc, err = analysis_service.save_upload(file_bytes=pdf_file.read(), filename=pdf_file.name)
-        if err or not doc:
-            message = getattr(err, "detail", str(err)) if err else "Upload failed"
-            st.error(message)
-            return
-        st.session_state.active_doc_id = doc.doc_id if hasattr(doc, "doc_id") else doc["doc_id"]
-        st.success("Upload complete. Document is queued for processing.")
-        st.rerun()
-    except Exception as exc:
-        logger.error("Upload failed: %s", exc)
-        st.error("Upload failed. Please try again.")
-
-
 def render_sidebar() -> None:
+    """Render the full application sidebar."""
+
+    # ── Branding ──────────────────────────────────────────────────────────────
     st.sidebar.markdown(
         """
-        ## PDF Research Analyzer
-        Upload documents, manage cache, and access the library from here.
+        <div class="sidebar-logo">
+            <div class="sidebar-logo-mark">📄</div>
+            <div class="sidebar-app-name">PDF Research</div>
+            <div class="sidebar-app-sub">Analyzer · AI Powered</div>
+        </div>
         """,
+        unsafe_allow_html=True,
     )
 
+    # ── Upload ────────────────────────────────────────────────────────────────
+    st.sidebar.markdown(
+        '<span class="sb-label">Upload</span>',
+        unsafe_allow_html=True,
+    )
     uploaded_file = st.sidebar.file_uploader(
         "Upload a file",
         type=["pdf", "docx", "doc", "txt", "xlsx", "xls", "csv"],
-        help="Supported formats: PDF, DOCX, TXT, XLSX, XLS, CSV",
-        key="sidebar_upload",
+        help="PDF · DOCX · TXT · XLSX · CSV — up to 50 MB",
+        label_visibility="collapsed",
+        key="sidebar_uploader",
+    )
+    if uploaded_file is not None:
+        # Guard: only process once per unique file name to avoid re-running on
+        # every Streamlit rerun while the same file is still in the uploader.
+        if uploaded_file.name != st.session_state.get("last_uploaded_name"):
+            st.session_state.last_uploaded_name = uploaded_file.name
+            handle_upload(uploaded_file)
+
+    # ── Document selector ─────────────────────────────────────────────────────
+    docs = analysis_service.list_documents()
+    if docs:
+        st.sidebar.markdown(
+            '<span class="sb-label" style="margin-top:1rem;">Documents</span>',
+            unsafe_allow_html=True,
+        )
+
+        doc_names = [doc["filename"] for doc in docs]
+        active_id = st.session_state.get("active_doc_id")
+
+        # Resolve current selectbox index from active_doc_id
+        try:
+            current_idx = next(
+                i for i, d in enumerate(docs) if d["doc_id"] == active_id
+            )
+        except StopIteration:
+            current_idx = 0
+
+        selected_name = st.sidebar.selectbox(
+            "Select document",
+            options=doc_names,
+            index=current_idx,
+            label_visibility="collapsed",
+            key="sidebar_doc_select",
+        )
+
+        # Only update active_doc_id when the user explicitly changes selection
+        selected_id = next(
+            (d["doc_id"] for d in docs if d["filename"] == selected_name), None
+        )
+        if selected_id and selected_id != active_id:
+            st.session_state.active_doc_id = selected_id
+            st.session_state.chat_history = []   # clear chat when switching docs
+            st.rerun()
+
+        # Status badge for selected doc
+        selected_doc = next(
+            (d for d in docs if d["filename"] == selected_name), None
+        )
+        if selected_doc:
+            status = selected_doc.get("status", "")
+            badge_color = {
+                "ready":      "var(--success)",
+                "failed":     "var(--accent)",
+                "extracting": "var(--warn)",
+                "embedding":  "var(--warn)",
+                "uploaded":   "var(--muted)",
+            }.get(status, "var(--muted)")
+            st.sidebar.markdown(
+                f'<div style="font-family:var(--f-mono);font-size:0.62rem;'
+                f'color:{badge_color};margin:0.2rem 0 0.6rem 0.1rem;">'
+                f'● {status or "unknown"}</div>',
+                unsafe_allow_html=True,
+            )
+
+    # ── Google Drive ──────────────────────────────────────────────────────────
+    st.sidebar.markdown("<hr>", unsafe_allow_html=True)
+    st.sidebar.markdown(
+        '<span class="sb-label">Google Drive Sync</span>',
+        unsafe_allow_html=True,
     )
 
-    if uploaded_file is not None:
-        handle_upload(uploaded_file)
+    if drive_service.is_configured:
+        st.sidebar.markdown(
+            f'<div style="font-family:var(--f-mono);font-size:0.65rem;'
+            f'color:var(--sb-muted);margin-bottom:0.5rem;word-break:break-all;">'
+            f'📁 {drive_service.folder_id}</div>',
+            unsafe_allow_html=True,
+        )
+        if st.sidebar.button("⟳ Sync Google Drive", type="primary", key="sidebar_drive_sync"):
+            with st.sidebar.status("Syncing Drive folder…", expanded=True) as sync_status:
+                try:
+                    result = analysis_service.sync_drive(
+                        on_file_found=lambda name, idx, total: st.write(
+                            f"{idx}/{total}: {name}"
+                        ),
+                    )
+                    jobs = analysis_service.process_pending_ingestion_jobs(limit=50)
+                    sync_status.update(label="Sync complete ✓", state="complete")
+                    st.sidebar.success(
+                        f"{result.get('new', 0)} changed · "
+                        f"{result.get('skipped', 0)} skipped · "
+                        f"{jobs.get('succeeded', 0)} processed"
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    sync_status.update(label="Sync failed", state="error")
+                    st.sidebar.error(f"Sync error: {exc}")
+    else:
+        folder_id_set = bool(os.getenv("GOOGLE_DRIVE_FOLDER_ID", "").strip())
 
-    st.sidebar.markdown("---")
-    st.sidebar.caption("Maximum upload size: 50 MB")
+        if not folder_id_set:
+            # Let the user paste the Drive URL or bare folder ID right here
+            st.sidebar.caption(
+                "Paste a Google Drive folder URL or ID to enable sync."
+            )
+            folder_input = st.sidebar.text_input(
+                "Drive folder URL or ID",
+                placeholder="https://drive.google.com/drive/folders/… or 1Bxi…",
+                label_visibility="collapsed",
+                key="sidebar_drive_folder_input",
+            )
+            if st.sidebar.button("Save folder ID", key="sidebar_drive_folder_save"):
+                raw = (folder_input or "").strip()
+                if raw:
+                    drive_service.set_folder_id(raw)
+                    st.sidebar.success(
+                        "Folder ID saved. Add credentials.json to the project "
+                        "root (or set [gcp_service_account] in Streamlit secrets) "
+                        "to complete Drive setup."
+                    )
+                    st.rerun()
+                else:
+                    st.sidebar.warning("Please enter a folder URL or ID.")
+        else:
+            # Folder ID is set but credentials JSON is missing
+            st.sidebar.warning(
+                "GOOGLE_DRIVE_FOLDER_ID is set but **credentials.json** is missing. "
+                "Upload your GCP service-account JSON to the project root, or add "
+                "it under `[gcp_service_account]` in Streamlit secrets.",
+                icon="🔑",
+            )
 
-    if st.sidebar.button("Delete all documents", key="delete_all_docs"):
-        delete_all_docs()
-        st.success("All documents and cached data have been removed.")
+    # ── Cache management ──────────────────────────────────────────────────────
+    st.sidebar.markdown("<hr>", unsafe_allow_html=True)
+    st.sidebar.markdown(
+        '<span class="sb-label">Manage</span>',
+        unsafe_allow_html=True,
+    )
+
+    active_doc = st.session_state.get("active_doc_id")
+    col_a, col_b = st.sidebar.columns(2)
+
+    with col_a:
+        if st.button(
+            "Clear doc",
+            disabled=not active_doc,
+            use_container_width=True,
+            key="sidebar_clear_cache",
+            help="Remove embeddings and index for the active document",
+        ):
+            delete_doc_cache(active_doc)
+            st.session_state.chat_history = []
+            st.sidebar.success("Cache cleared.")
+            st.rerun()
+
+    with col_b:
+        if st.button(
+            "Delete all",
+            use_container_width=True,
+            key="sidebar_delete_all",
+            type="primary",
+            help="Remove ALL documents and cached data — cannot be undone",
+        ):
+            st.session_state["_confirm_delete_all"] = True
+
+    # Confirmation step to prevent accidental mass deletion
+    if st.session_state.get("_confirm_delete_all"):
+        st.sidebar.warning("This will delete **all** documents. Are you sure?")
+        c1, c2 = st.sidebar.columns(2)
+        with c1:
+            if st.button("Yes, delete", type="primary", use_container_width=True, key="confirm_yes"):
+                delete_all_docs()
+                st.session_state.active_doc_id = None
+                st.session_state.chat_history = []
+                st.session_state.library_chat_history = []
+                st.session_state["_confirm_delete_all"] = False
+                st.rerun()
+        with c2:
+            if st.button("Cancel", use_container_width=True, key="confirm_no"):
+                st.session_state["_confirm_delete_all"] = False
+                st.rerun()
+
+    # ── Provider / API status ─────────────────────────────────────────────────
+    st.sidebar.markdown("<hr>", unsafe_allow_html=True)
+    st.sidebar.markdown(
+        '<span class="sb-label">AI Providers</span>',
+        unsafe_allow_html=True,
+    )
+
+    try:
+        provider_status = analysis_service.get_provider_status()
+    except Exception:
+        provider_status = {}
+
+    for provider_name, info in provider_status.items():
+        configured = info.get("configured", False)
+        model = info.get("model", "—")
+        dot_cls = "provider-dot-on" if configured else "provider-dot-off"
+        st.sidebar.markdown(
+            f'<div class="provider-row">'
+            f'  <span class="provider-name">'
+            f'    <span class="{dot_cls}">●</span> {provider_name}'
+            f'  </span>'
+            f'  <span class="provider-model">{model[:22]}</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+    if not provider_status:
+        st.sidebar.caption(
+            "No AI providers configured. Set OPENROUTER_API_KEY or HUGGINGFACE_API_KEY."
+        )
+
+    # ── App version footer ────────────────────────────────────────────────────
+    try:
+        from app.config import APP_VERSION
+        st.sidebar.markdown(
+            f'<div style="font-family:var(--f-mono);font-size:0.55rem;'
+            f'color:var(--sb-muted);margin-top:1.5rem;text-align:center;'
+            f'letter-spacing:0.08em;">v{APP_VERSION}</div>',
+            unsafe_allow_html=True,
+        )
+    except Exception:
+        pass
