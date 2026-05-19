@@ -40,49 +40,76 @@ class DriveService:
 
     def __init__(self) -> None:
         self._service = None
-        self._folder_id: str | None = self._parse_folder_id(
-            os.getenv("GOOGLE_DRIVE_FOLDER_ID", "").strip() or None
-        )
-        raw_creds_path = os.getenv("GOOGLE_CREDENTIALS_PATH", "credentials.json")
-        # Resolve credentials path relative to project BASE_DIR when a
-        # non-absolute path is provided. This ensures files materialized by
-        # `app.config` (from Streamlit secrets) are discovered correctly.
-        if raw_creds_path and os.path.isabs(raw_creds_path):
-            self._creds_path = raw_creds_path
-        else:
-            self._creds_path = str(BASE_DIR / raw_creds_path)
+        # _folder_id and _creds_path are resolved lazily so that values
+        # written to os.environ by config._materialize_google_credentials_file
+        # (or Streamlit secrets loading) are always picked up at call time.
+        self._folder_id: str | None = None   # resolved by _get_folder_id()
+        self._creds_path: str = ""            # resolved by _get_creds_path()
         self.upload_dir = UPLOAD_DIR
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self.last_sync: datetime | None = None
         self.last_sync_count: int = 0
-        logger.info("DriveService initialised. Folder ID: %s", self._folder_id or "NOT SET")
+        logger.info("DriveService initialised (folder ID resolved on first use)")
+
+    # ── Lazy resolvers ──────────────────────────────────────────────────────
+
+    def _get_folder_id(self) -> str | None:
+        """Read GOOGLE_DRIVE_FOLDER_ID from env at call time (never stale)."""
+        raw = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "").strip()
+        return self._parse_folder_id(raw or None)
+
+    def _get_creds_path(self) -> str:
+        """
+        Resolve the credentials file path at call time.
+        Priority:
+          1. GOOGLE_CREDENTIALS_PATH env var (may have been set by config.py
+             after writing secrets to disk)
+          2. BASE_DIR/credentials.json  (default materialization location)
+        """
+        raw = os.getenv("GOOGLE_CREDENTIALS_PATH", "credentials.json").strip()
+        if raw and os.path.isabs(raw):
+            return raw
+        resolved = str(BASE_DIR / raw)
+        # Also check the default materialization location as a fallback
+        default = str(BASE_DIR / "credentials.json")
+        if not Path(resolved).exists() and Path(default).exists():
+            return default
+        return resolved
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
     @property
     def is_configured(self) -> bool:
-        return bool(self._folder_id and Path(self._creds_path).exists())
+        """Re-evaluated on every call so secrets loaded after init are seen."""
+        folder = self._get_folder_id()
+        creds  = self._get_creds_path()
+        return bool(folder and Path(creds).exists())
 
     @property
     def folder_id(self) -> str | None:
-        return self._folder_id
+        return self._get_folder_id()
 
     def set_folder_id(self, folder_id: str) -> None:
-        self._folder_id = self._parse_folder_id(folder_id)
+        """Override folder ID at runtime (stores in env so lazy resolver sees it)."""
+        parsed = self._parse_folder_id(folder_id)
+        if parsed:
+            os.environ["GOOGLE_DRIVE_FOLDER_ID"] = parsed
 
     def set_credentials_path(self, path: str) -> None:
-        self._creds_path = path
+        """Override credentials path at runtime."""
+        os.environ["GOOGLE_CREDENTIALS_PATH"] = path
 
     def list_drive_files(self) -> list[dict]:
         """List all PDFs in the configured Drive folder."""
         svc = self._get_service()
-        if not svc or not self._folder_id:
+        folder_id = self._get_folder_id()
+        if not svc or not folder_id:
             return []
         try:
             results = (
                 svc.files()
                 .list(
-                    q=f"'{self._folder_id}' in parents and mimeType='application/pdf' and trashed=false",
+                    q=f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false",
                     fields="files(id, name, modifiedTime, md5Checksum, size)",
                     pageSize=200,
                 )
@@ -113,7 +140,8 @@ class DriveService:
 
         files = self.list_drive_files()
         result = {"new": 0, "skipped": 0, "failed": 0, "total": len(files)}
-        sync_run = repository.create_sync_run(self._folder_id or "", len(files))
+        _active_folder_id = self._get_folder_id() or ""
+        sync_run = repository.create_sync_run(_active_folder_id, len(files))
 
         for idx, f in enumerate(files):
             file_id = f["id"]
@@ -157,7 +185,7 @@ class DriveService:
                         local_path=str(dest_path),
                         file_size_bytes=size,
                         mime_type="application/pdf",
-                        source_folder=self._folder_id,
+                        source_folder=self._get_folder_id(),
                         drive_file_id=file_id,
                         checksum=md5,
                         modified_time=modified_time,
@@ -201,10 +229,11 @@ class DriveService:
     def get_folder_info(self) -> dict:
         """Get metadata about the Drive folder."""
         svc = self._get_service()
-        if not svc or not self._folder_id:
+        folder_id = self._get_folder_id()
+        if not svc or not folder_id:
             return {}
         try:
-            f = svc.files().get(fileId=self._folder_id, fields="name,id,modifiedTime").execute()
+            f = svc.files().get(fileId=folder_id, fields="name,id,modifiedTime").execute()
             return f
         except Exception as e:
             logger.error("Drive folder info failed: %s", e)
@@ -213,15 +242,21 @@ class DriveService:
     # ── Private ────────────────────────────────────────────────────────────────
 
     def _get_service(self):
-        if self._service:
+        # Re-check creds path each time in case it was materialised after init.
+        # Only use the cached client if the creds file hasn't changed.
+        creds_path = self._get_creds_path()
+        if self._service is not None:
             return self._service
+        if not Path(creds_path).exists():
+            logger.debug("Drive credentials file not found at %s", creds_path)
+            return None
         try:
             from google.oauth2 import service_account
             from googleapiclient.discovery import build
 
             SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
             creds = service_account.Credentials.from_service_account_file(
-                self._creds_path, scopes=SCOPES
+                creds_path, scopes=SCOPES
             )
             self._service = build("drive", "v3", credentials=creds, cache_discovery=False)
             logger.info("Google Drive service authenticated")

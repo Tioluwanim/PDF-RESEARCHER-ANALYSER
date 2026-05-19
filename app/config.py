@@ -96,6 +96,22 @@ def _resolved_path(path_value: str) -> Path:
 def _load_streamlit_secrets_into_env() -> None:
     """
     Safely load Streamlit secrets into environment variables.
+
+    Handles two layouts that users put in secrets.toml / Streamlit Cloud UI:
+
+    Layout A — flat keys:
+        OPENROUTER_API_KEY = "sk-or-..."
+        GOOGLE_DRIVE_FOLDER_ID = "1Bxi..."
+
+    Layout B — nested GCP service-account section:
+        [gcp_service_account]
+        type = "service_account"
+        project_id = "my-project"
+        private_key = "-----BEGIN RSA PRIVATE KEY-----\\n..."
+        client_email = "sa@project.iam.gserviceaccount.com"
+        ...
+        The function writes credentials.json to BASE_DIR and sets
+        GOOGLE_CREDENTIALS_PATH so drive_service picks it up.
     """
 
     try:
@@ -105,15 +121,60 @@ def _load_streamlit_secrets_into_env() -> None:
 
     try:
         secrets = getattr(st, "secrets", None)
-
         if secrets is None:
             return
 
+        # Pass 1: load all flat string keys into os.environ
         for key in secrets.keys():
-            value = secrets[key]
+            try:
+                value = secrets[key]
+                if isinstance(value, str):
+                    os.environ.setdefault(key, value)
+            except Exception:
+                pass
 
-            if isinstance(value, str):
-                os.environ.setdefault(key, value)
+        # Pass 2: look for a GCP service-account section and materialise JSON
+        _GCP_SECTIONS = (
+            "gcp_service_account",
+            "google_service_account",
+            "GOOGLE_SERVICE_ACCOUNT",
+            "GCP_SERVICE_ACCOUNT",
+        )
+        for _sec in _GCP_SECTIONS:
+            try:
+                section = (
+                    secrets.get(_sec)
+                    if hasattr(secrets, "get")
+                    else secrets[_sec]
+                )
+                if section is None or not isinstance(section, Mapping):
+                    continue
+                cred_path = BASE_DIR / "credentials.json"
+                if not cred_path.exists():
+                    _write_json_file(cred_path, dict(section))
+                os.environ.setdefault("GOOGLE_CREDENTIALS_PATH", str(cred_path))
+                break
+            except (KeyError, Exception):
+                continue
+
+        # Pass 3: surface GOOGLE_DRIVE_FOLDER_ID from optional sub-section
+        _DRIVE_KEY = "GOOGLE_DRIVE_FOLDER_ID"
+        if not os.environ.get(_DRIVE_KEY):
+            for _sec in ("google_drive", "GOOGLE_DRIVE", "drive"):
+                try:
+                    section = (
+                        secrets.get(_sec)
+                        if hasattr(secrets, "get")
+                        else secrets[_sec]
+                    )
+                    if section is None or not isinstance(section, Mapping):
+                        continue
+                    fid = section.get(_DRIVE_KEY) or section.get("folder_id")
+                    if fid and isinstance(fid, str):
+                        os.environ.setdefault(_DRIVE_KEY, fid)
+                        break
+                except (KeyError, Exception):
+                    continue
 
     except Exception:
         return
@@ -386,6 +447,30 @@ def _materialize_google_credentials_file() -> None:
 
 
 _materialize_google_credentials_file()
+
+
+def is_drive_sync_configured() -> bool:
+    """
+    Returns True when *both* conditions are met:
+      1. GOOGLE_DRIVE_FOLDER_ID is set (non-empty after env / secrets load)
+      2. The credentials JSON file exists at GOOGLE_CREDENTIALS_PATH
+
+    Called at runtime (not at import time) so it reflects the state *after*
+    Streamlit secrets have been loaded and credentials have been materialised.
+    """
+    folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "").strip()
+    if not folder_id:
+        return False
+
+    creds_raw = os.getenv("GOOGLE_CREDENTIALS_PATH", "credentials.json").strip()
+    creds_path = Path(creds_raw) if os.path.isabs(creds_raw) else BASE_DIR / creds_raw
+    if creds_path.exists():
+        return True
+
+    # Also check the default materialisation location
+    default_creds = BASE_DIR / "credentials.json"
+    return default_creds.exists()
+
 
 # =============================================================================
 # OPENROUTER
@@ -733,6 +818,7 @@ __all__ = [
     # Google
     "GOOGLE_DRIVE_FOLDER_ID",
     "GOOGLE_CREDENTIALS_PATH",
+    "is_drive_sync_configured",
 
     # OpenRouter
     "OPENROUTER_API_KEY",

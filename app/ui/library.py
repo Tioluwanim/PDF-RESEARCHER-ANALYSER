@@ -101,7 +101,22 @@ def _render_sync() -> None:
         if drive_service.is_configured:
             st.caption(f"Configured folder: {drive_service.folder_id}")
         else:
-            st.warning("Drive sync is not configured. Set GOOGLE_DRIVE_FOLDER_ID and GOOGLE_CREDENTIALS_PATH.")
+            # is_configured re-reads env/files at call time, so this only
+            # shows when config is genuinely absent — not a false positive.
+            missing = []
+            import os
+            if not os.getenv("GOOGLE_DRIVE_FOLDER_ID", "").strip():
+                missing.append("GOOGLE_DRIVE_FOLDER_ID")
+            if not os.getenv("GOOGLE_CREDENTIALS_PATH", "") or not __import__("pathlib").Path(
+                os.getenv("GOOGLE_CREDENTIALS_PATH", "credentials.json")
+            ).exists():
+                missing.append("credentials.json (GOOGLE_CREDENTIALS_PATH)")
+            if missing:
+                st.info(
+                    "Google Drive sync is not yet configured. "
+                    f"Missing: {', '.join(missing)}. "
+                    "Add them to your .env file or Streamlit secrets."
+                )
     with c2:
         if st.button("Rebuild library index", use_container_width=True, key="library_rebuild_index"):
             ok = analysis_service.rebuild_library_index()
