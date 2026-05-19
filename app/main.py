@@ -66,6 +66,7 @@ def _init_session() -> None:
         "export_data": {},
         "batch_done": False,
         "last_uploaded_name": None,
+        "_confirm_delete_all": False,
     }
 
     for key, value in defaults.items():
