@@ -71,7 +71,7 @@ class DriveService:
     def _get_folder_id(self) -> str | None:
         """Read GOOGLE_DRIVE_FOLDER_ID from env at call time (never stale)."""
         raw = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "").strip()
-        return self._parse_folder_id(raw or None)
+        return self._parse_drive_id(raw or None)
 
     def _get_creds_path(self) -> str:
         """
@@ -106,7 +106,7 @@ class DriveService:
 
     def set_folder_id(self, folder_id: str) -> None:
         """Override folder ID at runtime (stores in env so lazy resolver sees it)."""
-        parsed = self._parse_folder_id(folder_id)
+        parsed = self._parse_drive_id(folder_id)
         if parsed:
             os.environ["GOOGLE_DRIVE_FOLDER_ID"] = parsed
 
@@ -303,7 +303,7 @@ class DriveService:
                     "Share the folder with the service account email or add the account to the shared drive."
                 )
 
-            logger.error("Drive folder info failed: %s", error_message)
+            logger.debug("Drive folder info failed: %s", error_message)
             return {"error": error_message, "status_code": status_code}
 
     # ── Private ────────────────────────────────────────────────────────────────
@@ -412,7 +412,7 @@ class DriveService:
             raise RuntimeError(f"Drive file conversion failed for '{filename}': {e}") from e
 
     @staticmethod
-    def _parse_folder_id(raw_value: str | None) -> str | None:
+    def _parse_drive_id(raw_value: str | None) -> str | None:
         if not raw_value:
             return None
         value = raw_value.strip()
@@ -437,7 +437,30 @@ class DriveService:
                 if len(path_parts) == 2 and path_parts[0] == "folders":
                     return path_parts[1]
 
-            # Fall back to raw ID if the value looks like a Drive folder ID
+                # Example: file share URL: /file/d/<id>/view
+                if "file" in path_parts and "d" in path_parts:
+                    idx = path_parts.index("d")
+                    if idx + 1 < len(path_parts):
+                        return path_parts[idx + 1]
+
+                # Google Workspace file URLs
+                if len(path_parts) >= 3 and path_parts[0] in ("document", "spreadsheets", "presentation"):
+                    if path_parts[1] == "d" and len(path_parts) > 2:
+                        return path_parts[2]
+
+                # Example: drive.google.com/drive/u/0/folders/<id>
+                if "folders" in path_parts:
+                    idx = path_parts.index("folders")
+                    if idx + 1 < len(path_parts):
+                        return path_parts[idx + 1]
+
+                # Example: open?id=<id> or uc?id=<id>
+                query = parse_qs(parsed.query)
+                folder_ids = query.get("id") or query.get("fileid") or query.get("folderid") or query.get("folder_id")
+                if folder_ids:
+                    return folder_ids[0]
+
+            # Fall back to raw ID if the value looks like a Drive resource ID
             if value and all(c.isalnum() or c in ("-", "_") for c in value):
                 return value
         except Exception:
