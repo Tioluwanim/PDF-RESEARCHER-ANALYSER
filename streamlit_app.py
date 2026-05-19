@@ -1,8 +1,9 @@
 """
 streamlit_app.py - Entrypoint for Streamlit Cloud deployment.
 
-Sets critical env vars BEFORE any transformers/torch import to prevent
-Streamlit's file watcher from flooding logs with torchvision errors.
+Sets critical env vars and installs torchvision shims BEFORE any
+transformers/torch import to prevent Streamlit's file watcher from
+flooding logs with ModuleNotFoundError spam.
 """
 import os
 import sys
@@ -19,56 +20,72 @@ os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS",     "1")
 
 def _build_torchvision_shim() -> None:
     """
-    Install a lightweight dummy for torchvision when it is not installed.
+    Install a comprehensive dummy for torchvision when it is not installed.
 
-    The previous shim created plain ModuleType objects, which Python does not
-    treat as packages (they have no __path__).  Any code that does:
-        from torchvision.transforms.v2 import functional as tvF
-        from torchvision.transforms import functional as F
-    would raise:
+    Streamlit's file-watcher introspects every module that transformers exposes,
+    which triggers deep imports of vision models.  Without torchvision those
+    imports raise:
         ModuleNotFoundError: 'torchvision.transforms' is not a package
+        ImportError: cannot import name 'read_image' from 'torchvision.io'
 
-    Fix: set __path__ = [] on every stub module so Python recognises them as
-    namespace packages and allows sub-attribute access without crashing.
+    Fix:
+    - Every stub gets __path__ = [] so Python treats it as a package.
+    - Attribute stubs (read_image, functional, etc.) are installed as
+      no-op callables so that `from torchvision.io import read_image` works
+      without crashing.
     """
     try:
         import torchvision  # type: ignore  # noqa: F401
-        return  # real torchvision is available — nothing to do
+        return  # Real torchvision is present — nothing to do.
     except Exception:
         pass
 
     def _make_pkg(name: str) -> types.ModuleType:
         mod = types.ModuleType(name)
-        mod.__path__ = []       # marks it as a package
+        mod.__path__ = []        # marks it as a package
         mod.__package__ = name
         mod.__spec__ = None
         return mod
 
-    # Root
+    def _noop(*_a, **_kw):
+        return None
+
+    # ── Root ──────────────────────────────────────────────────────────────────
     _tv = _make_pkg("torchvision")
 
-    # First-level submodules
-    first_level = ("transforms", "models", "io", "ops", "datasets")
-    for sub in first_level:
+    # ── First-level sub-packages ──────────────────────────────────────────────
+    for sub in ("transforms", "models", "io", "ops", "datasets", "utils"):
         full = f"torchvision.{sub}"
         pkg = _make_pkg(full)
         setattr(_tv, sub, pkg)
         sys.modules[full] = pkg
 
-    # torchvision.transforms needs .v2 and .functional as sub-packages
-    _transforms = sys.modules["torchvision.transforms"]
+    # ── torchvision.io — stub out all commonly-imported symbols ───────────────
+    _io = sys.modules["torchvision.io"]
+    for sym in ("read_image", "write_jpeg", "write_png", "decode_image",
+                "encode_jpeg", "encode_png", "read_video", "write_video",
+                "ImageReadMode"):
+        setattr(_io, sym, _noop)
 
+    # ── torchvision.transforms — needs .v2 and .functional ───────────────────
+    _transforms = sys.modules["torchvision.transforms"]
     for sub2 in ("v2", "functional"):
         full2 = f"torchvision.transforms.{sub2}"
         pkg2 = _make_pkg(full2)
         setattr(_transforms, sub2, pkg2)
         sys.modules[full2] = pkg2
 
-    # torchvision.transforms.v2 needs .functional too
+    # ── torchvision.transforms.v2 — needs its own .functional ────────────────
     _v2 = sys.modules["torchvision.transforms.v2"]
     _v2_func = _make_pkg("torchvision.transforms.v2.functional")
     _v2.functional = _v2_func
     sys.modules["torchvision.transforms.v2.functional"] = _v2_func
+
+    # ── torchvision.ops — stub common symbols ─────────────────────────────────
+    _ops = sys.modules["torchvision.ops"]
+    for sym in ("nms", "roi_align", "roi_pool", "box_iou",
+                "generalized_box_iou", "clip_boxes_to_image"):
+        setattr(_ops, sym, _noop)
 
     sys.modules["torchvision"] = _tv
 
