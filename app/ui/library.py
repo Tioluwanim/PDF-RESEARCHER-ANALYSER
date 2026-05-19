@@ -140,16 +140,30 @@ def _render_sync() -> None:
     folder_info = {} if not drive_service.is_configured else drive_service.get_folder_info()
     if drive_service.is_configured:
         if folder_info and not folder_info.get("error"):
-            st.caption(
-                f"✓ Ready to sync — folder: `{drive_service.folder_id}` (name: {folder_info.get('name', 'unknown')})"
-            )
+            if folder_info.get("mimeType") == "application/vnd.google-apps.folder":
+                st.caption(
+                    f"✓ Ready to sync — folder: `{drive_service.folder_id}` (name: {folder_info.get('name', 'unknown')})"
+                )
+            else:
+                st.caption(
+                    f"✓ Ready to sync — file: `{drive_service.folder_id}` (name: {folder_info.get('name', 'unknown')})"
+                )
+            service_email = drive_service.get_service_account_email()
+            if service_email:
+                st.caption(f"Service account: `{service_email}`")
         else:
-            error_detail = folder_info.get("error", "Could not read folder metadata.")
+            error_detail = folder_info.get("error", "Could not read Drive metadata.")
+            service_email = drive_service.get_service_account_email()
             st.warning(
-                "Drive folder is saved, but folder metadata could not be read. "
-                "Confirm the service account has access to the folder.",
+                "Drive folder or file is saved, but metadata could not be read. "
+                "This usually means the service account does not have access to the resource.",
                 icon="⚠️",
             )
+            if service_email:
+                st.info(
+                    f"Share the folder or file with the service account email: `{service_email}`. "
+                    f"If the resource is on a shared drive, ensure the account is a member of that shared drive."
+                )
             st.caption(f"Drive metadata error: {error_detail}")
     elif creds_ok and not current_folder:
         st.caption("Paste your Drive folder URL above and click Save to enable sync.")

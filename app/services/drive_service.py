@@ -115,10 +115,19 @@ class DriveService:
         os.environ["GOOGLE_CREDENTIALS_PATH"] = path
 
     def list_drive_files(self) -> list[dict]:
-        """List all supported files in the configured Drive folder, including nested folders."""
+        """List all supported Drive files in the configured Drive folder or return a single file resource."""
         svc = self._get_service()
         folder_id = self._get_folder_id()
         if not svc or not folder_id:
+            return []
+
+        resource = self._get_drive_resource_info(folder_id)
+        if not resource:
+            return []
+
+        if resource.get("mimeType") != FOLDER_MIME_TYPE:
+            if self._is_supported_drive_file(resource):
+                return [resource]
             return []
 
         files: list[dict] = []
@@ -146,9 +155,7 @@ class DriveService:
                         mime_type = item.get("mimeType")
                         if mime_type == FOLDER_MIME_TYPE:
                             folders.append(item["id"])
-                        elif mime_type in SUPPORTED_DRIVE_MIME_TYPES or (
-                            isinstance(mime_type, str) and mime_type.startswith("application/vnd.google-apps.")
-                        ):
+                        elif self._is_supported_drive_file(item):
                             files.append(item)
                     page_token = response.get("nextPageToken")
                     if not page_token:
@@ -281,9 +288,23 @@ class DriveService:
             ).execute()
             return f
         except Exception as e:
-            message = str(e)
-            logger.error("Drive folder info failed: %s", message)
-            return {"error": message}
+            error_message = str(e)
+            status_code = None
+            try:
+                from googleapiclient.errors import HttpError
+                if isinstance(e, HttpError):
+                    status_code = getattr(e.resp, "status", None)
+            except Exception:
+                pass
+
+            if status_code == 404:
+                error_message = (
+                    "File not found. The service account likely does not have access to this folder. "
+                    "Share the folder with the service account email or add the account to the shared drive."
+                )
+
+            logger.error("Drive folder info failed: %s", error_message)
+            return {"error": error_message, "status_code": status_code}
 
     # ── Private ────────────────────────────────────────────────────────────────
 
@@ -312,6 +333,40 @@ class DriveService:
             return None
         except Exception as e:
             logger.error("Drive auth failed: %s", e)
+            return None
+
+    def _get_drive_resource_info(self, file_id: str) -> dict | None:
+        svc = self._get_service()
+        if not svc:
+            return None
+        try:
+            return svc.files().get(
+                fileId=file_id,
+                fields="id,name,mimeType,modifiedTime,md5Checksum,size",
+                supportsAllDrives=True,
+            ).execute()
+        except Exception as e:
+            logger.error("Drive resource info failed for %s: %s", file_id, e)
+            return None
+
+    def _is_supported_drive_file(self, item: dict) -> bool:
+        mime_type = item.get("mimeType")
+        return (
+            mime_type in SUPPORTED_DRIVE_MIME_TYPES
+            or (isinstance(mime_type, str) and mime_type.startswith("application/vnd.google-apps."))
+        )
+
+    def get_service_account_email(self) -> str | None:
+        """Return the email address from the service account credentials JSON."""
+        creds_path = self._get_creds_path()
+        if not Path(creds_path).exists():
+            return None
+        try:
+            import json
+            data = json.loads(Path(creds_path).read_text(encoding="utf-8"))
+            return data.get("client_email")
+        except Exception as e:
+            logger.debug("Failed to read service account email: %s", e)
             return None
 
     def _download_file(self, file_id: str, mime_type: str | None) -> bytes:
