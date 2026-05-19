@@ -139,16 +139,18 @@ def _render_sync() -> None:
 
     folder_info = {} if not drive_service.is_configured else drive_service.get_folder_info()
     if drive_service.is_configured:
-        if folder_info:
+        if folder_info and not folder_info.get("error"):
             st.caption(
                 f"✓ Ready to sync — folder: `{drive_service.folder_id}` (name: {folder_info.get('name', 'unknown')})"
             )
         else:
+            error_detail = folder_info.get("error", "Could not read folder metadata.")
             st.warning(
                 "Drive folder is saved, but folder metadata could not be read. "
                 "Confirm the service account has access to the folder.",
                 icon="⚠️",
             )
+            st.caption(f"Drive metadata error: {error_detail}")
     elif creds_ok and not current_folder:
         st.caption("Paste your Drive folder URL above and click Save to enable sync.")
 

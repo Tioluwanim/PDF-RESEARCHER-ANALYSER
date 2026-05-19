@@ -268,13 +268,16 @@ class DriveService:
         svc = self._get_service()
         folder_id = self._get_folder_id()
         if not svc or not folder_id:
-            return {}
+            message = "Drive service not authenticated or folder ID invalid."
+            logger.warning(message)
+            return {"error": message}
         try:
             f = svc.files().get(fileId=folder_id, fields="name,id,modifiedTime").execute()
             return f
         except Exception as e:
-            logger.error("Drive folder info failed: %s", e)
-            return {}
+            message = str(e)
+            logger.error("Drive folder info failed: %s", message)
+            return {"error": message}
 
     # ── Private ────────────────────────────────────────────────────────────────
 
