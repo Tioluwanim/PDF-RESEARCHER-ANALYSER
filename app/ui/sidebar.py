@@ -130,7 +130,7 @@ def render_sidebar() -> None:
             f'📁 {drive_service.folder_id}</div>',
             unsafe_allow_html=True,
         )
-        if st.sidebar.button("⟳ Sync Google Drive", type="primary", key="sidebar_drive_sync", width="stretch"):
+        if st.sidebar.button("⟳ Sync Google Drive", type="primary", key="sidebar_drive_sync", use_container_width=True):
             status = st.sidebar.empty()
             with st.sidebar.status("Syncing Drive folder…", expanded=True) as sync_status:
                 try:
@@ -202,7 +202,7 @@ def render_sidebar() -> None:
         if st.button(
             "Clear doc",
             disabled=not active_doc,
-            width="stretch",
+            use_container_width=True,
             key="sidebar_clear_cache",
             help="Remove embeddings and index for the active document",
         ):
@@ -214,7 +214,7 @@ def render_sidebar() -> None:
     with col_b:
         if st.button(
             "Delete all",
-            width="stretch",
+            use_container_width=True,
             key="sidebar_delete_all",
             type="primary",
             help="Remove ALL documents and cached data — cannot be undone",
@@ -226,7 +226,7 @@ def render_sidebar() -> None:
         st.sidebar.warning("This will delete **all** documents. Are you sure?")
         c1, c2 = st.sidebar.columns(2)
         with c1:
-            if st.button("Yes, delete", type="primary", width="stretch", key="confirm_yes"):
+            if st.button("Yes, delete", type="primary", use_container_width=True, key="confirm_yes"):
                 delete_all_docs()
                 st.session_state.active_doc_id = None
                 st.session_state.chat_history = []
@@ -234,7 +234,7 @@ def render_sidebar() -> None:
                 st.session_state["_confirm_delete_all"] = False
                 st.rerun()
         with c2:
-            if st.button("Cancel", width="stretch", key="confirm_no"):
+            if st.button("Cancel", use_container_width=True, key="confirm_no"):
                 st.session_state["_confirm_delete_all"] = False
                 st.rerun()
 

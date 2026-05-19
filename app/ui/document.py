@@ -105,9 +105,9 @@ def render_chat_tab(doc_id: str, info: dict) -> None:
             key="chat_input",
         )
     with c_btn:
-        send = st.button("Send", type="primary", width="stretch", key="send_btn")
+        send = st.button("Send", type="primary", use_container_width=True, key="send_btn")
     with c_clr:
-        if st.button("Clear", width="stretch", disabled=not history, key="clear_btn"):
+        if st.button("Clear", use_container_width=True, disabled=not history, key="clear_btn"):
             st.session_state.chat_history = []
             st.rerun()
 
@@ -127,7 +127,7 @@ def render_chat_tab(doc_id: str, info: dict) -> None:
         cols = st.columns(len(suggestions))
         for col, s in zip(cols, suggestions):
             with col:
-                if st.button(s, key=f"sugg_{hash(s)}", width="stretch"):
+                if st.button(s, key=f"sugg_{hash(s)}", use_container_width=True):
                     handle_chat(doc_id, s)
                     st.rerun()
 

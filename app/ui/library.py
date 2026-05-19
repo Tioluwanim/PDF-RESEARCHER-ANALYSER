@@ -133,7 +133,7 @@ def _render_catalog() -> None:
 
     st.dataframe(
         rows,
-        width="stretch",
+        use_container_width=True,
         hide_index=True,
     )
 
@@ -165,340 +165,294 @@ def _render_catalog() -> None:
 
 
 def _render_sync() -> None:
+    """
+    Complete Google Drive setup wizard + sync UI.
+
+    Layout:
+      Step 1 — Paste Drive folder URL (always visible)
+      Step 2 — Auth status with contextual help
+               a) Service account: show email to share with + status
+               b) OAuth: Sign-in button + auto-detect ?code= redirect
+      Step 3 — Sync button (enabled only when ready)
+      Step 4 — Recent sync history
+    """
+    import os as _os
+    from pathlib import Path as _Path
+
     auth_state = drive_service.get_auth_state()
 
-    st.markdown("### Google Drive Sync")
+    # ── Auto-handle OAuth ?code= redirect ────────────────────────────────────
+    try:
+        params = st.query_params
+        oauth_code = params.get("code", "")
+        oauth_state = params.get("state", "")
+        if oauth_code and auth_state.status in ("oauth_login_required", "missing_folder", "ready"):
+            with st.spinner("Completing Google authentication…"):
+                result = drive_service.exchange_authorization_code(str(oauth_code))
+            if result.get("success"):
+                # Clear the code from URL
+                st.query_params.clear()
+                st.success("✓ Google account connected. You can now sync Drive.")
+                st.rerun()
+            else:
+                st.error(f"OAuth failed: {result.get('error', 'Unknown error')}")
+    except Exception:
+        pass  # query_params not available in all contexts
 
-    # ──────────────────────────────────────────────────────────────────────
-    # Folder input
-    # ──────────────────────────────────────────────────────────────────────
+    st.markdown("### Google Drive Sync")
+    st.caption(
+        "Connect your library's Google Drive folder so documents are synced automatically."
+    )
+
+    # ── Step 1: Folder URL ────────────────────────────────────────────────────
+    st.markdown("#### Step 1 — Your Drive folder")
 
     current_folder = drive_service.folder_id or ""
-
     col_url, col_save = st.columns([5, 1])
-
     with col_url:
-        folder_url = st.text_input(
-            "Google Drive folder URL or file URL",
+        folder_input = st.text_input(
+            "Google Drive folder URL",
             value=current_folder,
-            placeholder=(
-                "https://drive.google.com/drive/folders/..."
-            ),
-            help=(
-                "Paste a Google Drive folder URL or a direct file URL."
-            ),
+            placeholder="https://drive.google.com/drive/folders/1BxiMVs0XRA5…",
+            help="Paste the URL of your shared Drive folder. Works with folder URLs, file URLs, or raw IDs.",
             key="drive_folder_url_input",
         )
-
     with col_save:
-        st.markdown(
-            "<div style='padding-top:1.85rem;'>",
-            unsafe_allow_html=True,
-        )
-
-        save_clicked = st.button(
-            "Save",
-            width="stretch",
-            key="drive_folder_save",
-        )
-
-        st.markdown(
-            "</div>",
-            unsafe_allow_html=True,
-        )
-
-    if save_clicked:
-        if not folder_url.strip():
-            st.warning(
-                "Please paste a Google Drive folder URL first."
-            )
-        else:
-            drive_service.set_folder_id(folder_url.strip())
-
-            parsed = drive_service.folder_id
-
-            if parsed:
-                os.environ["GOOGLE_DRIVE_FOLDER_ID"] = parsed
-
-                st.success(
-                    f"✓ Google Drive resource saved: `{parsed}`"
-                )
-
-                st.rerun()
-
+        st.markdown("<div style='padding-top:1.75rem;'>", unsafe_allow_html=True)
+        if st.button("Save", use_container_width=True, key="drive_folder_save"):
+            if not folder_input.strip():
+                st.warning("Paste a Google Drive folder URL first.")
             else:
-                st.error(
-                    "Could not parse a valid Google Drive ID "
-                    "from the provided URL."
-                )
-
-    st.markdown(
-        "<hr style='margin:0.75rem 0;'>",
-        unsafe_allow_html=True,
-    )
-
-    # ──────────────────────────────────────────────────────────────────────
-    # Auth state
-    # ──────────────────────────────────────────────────────────────────────
-
-    if auth_state.status == "missing_folder":
-        st.info(
-            "Paste your Google Drive folder URL above and click Save."
-        )
-
-    elif auth_state.status == "missing_credentials":
-        st.error(auth_state.message)
-
-        st.code(
-            """
-Required options:
-
-1. OAuth login (recommended)
-   - GOOGLE_OAUTH_CLIENT_JSON
-   - GOOGLE_OAUTH_REDIRECT_URI
-
-OR
-
-2. Service account
-   - GOOGLE_CREDENTIALS_PATH
-   - Share folder with the service account email
-            """.strip()
-        )
-
-    elif auth_state.status == "oauth_login_required":
-        st.warning(
-            "Google OAuth is configured, but login is required."
-        )
-
-        if auth_state.authorization_url:
-            st.link_button(
-                "Sign in with Google",
-                auth_state.authorization_url,
-                use_container_width=True,
-            )
-
-        st.caption(
-            "After authorizing the app, copy the authorization "
-            "code and paste it below."
-        )
-
-        auth_code = st.text_input(
-            "Authorization code",
-            type="password",
-            key="google_oauth_code",
-        )
-
-        if st.button(
-            "Complete Google Login",
-            type="primary",
-            key="google_oauth_complete_btn",
-        ):
-            if not auth_code.strip():
-                st.warning(
-                    "Paste the authorization code first."
-                )
-            else:
-                with st.spinner(
-                    "Completing Google authentication..."
-                ):
-                    result = drive_service.exchange_authorization_code(
-                        auth_code.strip()
-                    )
-
-                if result.get("success"):
-                    st.success(
-                        "Google Drive authentication completed."
-                    )
+                drive_service.set_folder_id(folder_input.strip())
+                parsed = drive_service.folder_id
+                if parsed:
+                    _os.environ["GOOGLE_DRIVE_FOLDER_ID"] = parsed
+                    st.success(f"✓ Folder saved: `{parsed}`")
                     st.rerun()
-
                 else:
                     st.error(
-                        result.get(
-                            "error",
-                            "OAuth authentication failed.",
-                        )
+                        "Could not parse a folder ID from that URL. "
+                        "Example: `https://drive.google.com/drive/folders/1BxiMVs0XRA5…`"
                     )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    if current_folder:
+        st.caption(f"Active folder ID: `{current_folder}`")
+
+    st.divider()
+
+    # ── Step 2: Authentication ────────────────────────────────────────────────
+    st.markdown("#### Step 2 — Authentication")
+
+    # Re-read auth state after possible folder save
+    auth_state = drive_service.get_auth_state()
+
+    if auth_state.status == "missing_folder":
+        st.info("📂 Save your Drive folder URL above to continue.")
+
+    elif auth_state.status == "missing_credentials":
+        st.warning("No Google credentials found. Choose one of the two options below.", icon="🔑")
+
+        tab_sa, tab_oauth = st.tabs(["Option A — Service Account", "Option B — OAuth (Sign in with Google)"])
+
+        with tab_sa:
+            st.markdown(
+                """
+**Service Account** is the simplest option for a shared library folder.
+
+**Setup steps:**
+1. Go to [Google Cloud Console](https://console.cloud.google.com) → **APIs & Services** → **Enable APIs** → enable **Google Drive API**
+2. **IAM & Admin** → **Service Accounts** → **Create Service Account**
+3. Click the service account → **Keys** → **Add Key** → **JSON** → download file
+4. Add the JSON to Streamlit secrets as:
+
+```toml
+[gcp_service_account]
+type = "service_account"
+project_id = "your-project"
+private_key_id = "..."
+private_key = "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----\n"
+client_email = "your-sa@your-project.iam.gserviceaccount.com"
+client_id = "..."
+auth_uri = "https://accounts.google.com/o/oauth2/auth"
+token_uri = "https://oauth2.googleapis.com/token"
+```
+
+5. Share your Drive folder with the `client_email` address (Viewer access).
+                """.strip()
+            )
+
+        with tab_oauth:
+            st.markdown(
+                """
+**OAuth** lets a Google user authorise the app directly.
+
+**Setup steps:**
+1. Go to [Google Cloud Console](https://console.cloud.google.com) → **APIs & Services** → **Credentials**
+2. **Create Credentials** → **OAuth Client ID** → **Web application**
+3. Add your app URL to **Authorised redirect URIs**
+4. Download the client JSON and add it to Streamlit secrets as:
+
+```toml
+[google_oauth_client]
+type = "authorized_user"   # or leave out
+client_id = "….apps.googleusercontent.com"
+client_secret = "GOCSPX-…"
+redirect_uris = ["https://your-app.streamlit.app/"]
+auth_uri = "https://accounts.google.com/o/oauth2/auth"
+token_uri = "https://oauth2.googleapis.com/token"
+```
+
+5. Set `GOOGLE_OAUTH_REDIRECT_URI` in secrets to your app URL.
+                """.strip()
+            )
+
+    elif auth_state.status == "oauth_login_required":
+        st.warning("Google OAuth is configured — sign in to authorise access.", icon="🔐")
+
+        auth_info = drive_service.get_authorization_url()
+        auth_url  = auth_info.get("authorization_url")
+
+        if auth_url:
+            st.markdown(
+                "Click the button below. After approving, Google will redirect you back "
+                "to this page and the app will complete login automatically."
+            )
+            st.link_button("🔐 Sign in with Google", auth_url, use_container_width=True)
+
+            st.markdown("---")
+            st.caption(
+                "If the redirect does not work automatically, copy the `code=` value "
+                "from the browser URL and paste it below."
+            )
+            manual_code = st.text_input(
+                "Authorization code (manual fallback)",
+                type="password",
+                key="google_oauth_code_manual",
+                placeholder="4/0AY0e-g7…",
+            )
+            if st.button("Complete login manually", key="oauth_manual_btn"):
+                if manual_code.strip():
+                    with st.spinner("Exchanging authorization code…"):
+                        result = drive_service.exchange_authorization_code(manual_code.strip())
+                    if result.get("success"):
+                        st.success("✓ Google Drive authenticated.")
+                        st.rerun()
+                    else:
+                        st.error(f"Failed: {result.get('error')}")
+                else:
+                    st.warning("Paste the authorization code first.")
+        else:
+            st.error(auth_info.get("error", "Could not generate authorization URL."))
 
     elif auth_state.status == "ready":
-        st.success(
-            f"Drive authentication ready "
-            f"({auth_state.auth_mode})."
-        )
+        mode_label = {
+            "oauth_user":       "OAuth (signed-in user)",
+            "service_account":  "Service Account",
+        }.get(auth_state.auth_mode or "", auth_state.auth_mode or "unknown")
 
+        st.success(f"✓ Authenticated via {mode_label}", icon="✅")
+
+        # Show folder name
         folder_info = drive_service.get_folder_info()
-
         if folder_info and not folder_info.get("error"):
-            mime_type = folder_info.get("mimeType")
+            mime = folder_info.get("mimeType", "")
+            icon = "📁" if "folder" in mime else "📄"
+            st.caption(f"{icon} {folder_info.get('name', 'Unknown')}")
+        elif folder_info.get("error"):
+            st.warning(folder_info["error"])
 
-            if mime_type == "application/vnd.google-apps.folder":
-                st.caption(
-                    f"Folder: {folder_info.get('name', 'Unknown')}"
-                )
-            else:
-                st.caption(
-                    f"File: {folder_info.get('name', 'Unknown')}"
-                )
-
-        else:
-            st.warning(
-                folder_info.get(
-                    "error",
-                    "Could not read Google Drive metadata.",
-                )
+        # Show service account email as sharing reminder
+        sa_email = drive_service.get_service_account_email()
+        if sa_email:
+            st.info(
+                f"Make sure your Drive folder is shared with: `{sa_email}` (Viewer)",
+                icon="📧",
             )
 
-        service_email = drive_service.get_service_account_email()
+    st.divider()
 
-        if service_email:
-            st.caption(
-                f"Service account: `{service_email}`"
-            )
+    # ── Step 3: Sync actions ──────────────────────────────────────────────────
+    st.markdown("#### Step 3 — Sync")
 
-    st.markdown(
-        "<hr style='margin:1rem 0;'>",
-        unsafe_allow_html=True,
-    )
+    sync_ready = auth_state.status == "ready"
 
-    # ──────────────────────────────────────────────────────────────────────
-    # Actions
-    # ──────────────────────────────────────────────────────────────────────
-
-    col1, col2 = st.columns([2, 1])
-
-    with col1:
-        st.caption(
-            "Sync new or changed Drive documents into the library."
-        )
-
-    with col2:
-        if st.button(
-            "Rebuild library index",
-            width="stretch",
-            key="library_rebuild_index",
-        ):
+    col_sync, col_rebuild = st.columns([3, 1])
+    with col_rebuild:
+        if st.button("Rebuild index", use_container_width=True, key="library_rebuild_index"):
             ok = analysis_service.rebuild_library_index()
+            st.success("Library index rebuilt.") if ok else st.warning("No embedded chunks found.")
 
-            if ok:
-                st.success("Library index rebuilt.")
+    with col_sync:
+        if st.button(
+            "🔄 Sync Drive and process new files",
+            type="primary",
+            use_container_width=True,
+            disabled=not sync_ready,
+            key="library_drive_sync",
+            help="Complete Steps 1 & 2 first." if not sync_ready else "Sync new or changed PDFs from Drive.",
+        ):
+            progress = st.empty()
+
+            def _on_file_found(name: str, idx: int, total: int) -> None:
+                progress.info(f"Checking {idx}/{total}: {name}")
+
+            def _on_job_progress(step: str, pct: int) -> None:
+                progress.info(f"Processing {pct}%: {step}")
+
+            with st.spinner("Syncing Google Drive…"):
+                result = analysis_service.sync_drive(on_file_found=_on_file_found)
+
+            if result.get("error"):
+                progress.empty()
+                st.error(result["error"])
+                if result.get("authorization_url"):
+                    st.link_button("Authenticate with Google", result["authorization_url"], use_container_width=True)
             else:
-                st.warning(
-                    "No embedded chunks found to index."
+                jobs = analysis_service.process_pending_ingestion_jobs(
+                    limit=100, on_progress=_on_job_progress
                 )
+                progress.info("Rebuilding semantic index…")
+                analysis_service.rebuild_library_index()
+                progress.empty()
 
-    sync_disabled = auth_state.status != "ready"
+                if result.get("total", 0) == 0:
+                    st.warning("No supported files found in the Drive folder.")
+                else:
+                    st.success(
+                        f"✓ Sync complete — "
+                        f"{result.get('new', 0)} new · "
+                        f"{result.get('updated', 0)} updated · "
+                        f"{result.get('skipped', 0)} unchanged · "
+                        f"{result.get('failed', 0)} failed"
+                    )
+                if jobs.get("succeeded", 0) or jobs.get("failed", 0):
+                    st.info(
+                        f"Processing: {jobs.get('succeeded', 0)} succeeded · "
+                        f"{jobs.get('failed', 0)} failed"
+                    )
 
-    if st.button(
-        "Sync Drive and process changes",
-        type="primary",
-        disabled=sync_disabled,
-        key="library_drive_sync",
-        help=(
-            "Configure Drive authentication first."
-            if sync_disabled
-            else None
-        ),
-    ):
-        progress = st.empty()
-
-        def on_file_found(
-            name: str,
-            idx: int,
-            total: int,
-        ) -> None:
-            progress.info(
-                f"Checking file {idx}/{total}: {name}"
-            )
-
-        def on_job_progress(
-            step: str,
-            pct: int,
-        ) -> None:
-            progress.info(
-                f"[Ingestion {pct}%] {step}"
-            )
-
-        with st.spinner("Syncing Google Drive..."):
-            result = analysis_service.sync_drive(
-                on_file_found=on_file_found,
-            )
-
-        if result.get("error"):
-            progress.empty()
-
-            st.error(result["error"])
-
-            auth_url = result.get("authorization_url")
-
-            if auth_url:
-                st.link_button(
-                    "Authenticate with Google",
-                    auth_url,
-                    use_container_width=True,
-                )
-
-            return
-
-        jobs = analysis_service.process_pending_ingestion_jobs(
-            limit=100,
-            on_progress=on_job_progress,
-        )
-
-        progress.info("Rebuilding semantic index...")
-
-        analysis_service.rebuild_library_index()
-
-        progress.empty()
-
-        if result.get("total", 0) == 0:
-            st.warning(
-                "No supported files were discovered in the "
-                "Google Drive folder."
-            )
-
-        st.success(
-            f"Sync complete: "
-            f"{result.get('new', 0)} new, "
-            f"{result.get('updated', 0)} updated, "
-            f"{result.get('skipped', 0)} skipped, "
-            f"{result.get('failed', 0)} failed."
-        )
-
-        st.info(
-            f"Ingestion jobs: "
-            f"{jobs.get('succeeded', 0)} succeeded, "
-            f"{jobs.get('failed', 0)} failed."
-        )
-
-    # ──────────────────────────────────────────────────────────────────────
-    # Recent sync runs
-    # ──────────────────────────────────────────────────────────────────────
-
+    # ── Step 4: Sync history ──────────────────────────────────────────────────
     runs = analysis_service.get_recent_sync_runs(limit=10)
-
     if runs:
-        st.markdown("### Recent sync runs")
-
+        st.markdown("#### Recent sync runs")
         st.dataframe(
             [
                 {
-                    "Started": (
-                        r.started_at.isoformat()
-                        if r.started_at
-                        else ""
-                    ),
-                    "Status": r.status,
-                    "Total": r.total_files,
-                    "New": r.new_files,
-                    "Skipped": r.skipped_files,
-                    "Failed": r.failed_files,
-                    "Error": r.error_message or "",
+                    "Started":  r.started_at.isoformat() if r.started_at else "",
+                    "Status":   r.status,
+                    "Total":    r.total_files,
+                    "New":      r.new_files,
+                    "Updated":  getattr(r, "updated_files", 0),
+                    "Skipped":  r.skipped_files,
+                    "Failed":   r.failed_files,
+                    "Error":    r.error_message or "",
                 }
                 for r in runs
             ],
-            width="stretch",
+            use_container_width=True,
             hide_index=True,
         )
-
 
 # =============================================================================
 # SEARCH
@@ -810,7 +764,7 @@ def _render_export_readiness() -> None:
                 }
                 for doc in ready
             ],
-            width="stretch",
+            use_container_width=True,
             hide_index=True,
         )
 
@@ -829,7 +783,7 @@ def _render_logs() -> None:
 
     st.dataframe(
         rows,
-        width="stretch",
+        use_container_width=True,
         hide_index=True,
     )
 

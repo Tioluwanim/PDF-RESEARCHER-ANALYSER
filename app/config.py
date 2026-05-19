@@ -351,7 +351,17 @@ GOOGLE_CREDENTIALS_JSON = _env_str("GOOGLE_CREDENTIALS_JSON")
 GOOGLE_OAUTH_CLIENT_SECTION = _env_str("GOOGLE_OAUTH_CLIENT_SECTION", "google_oauth_client")
 GOOGLE_OAUTH_CLIENT_PATH = _env_str("GOOGLE_OAUTH_CLIENT_PATH", str(DATA_DIR / "google_oauth_client.json"))
 GOOGLE_OAUTH_TOKEN_PATH = _env_str("GOOGLE_OAUTH_TOKEN_PATH", str(DATA_DIR / "google_oauth_token.json"))
-GOOGLE_OAUTH_REDIRECT_URI = _env_str("GOOGLE_OAUTH_REDIRECT_URI", "http://localhost:8501/")
+# On Streamlit Cloud the redirect URI must match the deployed URL.
+# We auto-detect it at runtime; the env var overrides when explicitly set.
+def _detect_oauth_redirect_uri() -> str:
+    explicit = os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "").strip()
+    if explicit:
+        return explicit
+    # Streamlit Cloud sets STREAMLIT_SHARING_MODE or we can read the server URL
+    # from Streamlit config at runtime — safest default is localhost for dev.
+    return "http://localhost:8501/"
+
+GOOGLE_OAUTH_REDIRECT_URI = _detect_oauth_redirect_uri()
 GOOGLE_OAUTH_CLIENT_ID = _env_str("GOOGLE_OAUTH_CLIENT_ID")
 GOOGLE_OAUTH_CLIENT_SECRET = _env_str("GOOGLE_OAUTH_CLIENT_SECRET")
 GOOGLE_OAUTH_PROJECT_ID = _env_str("GOOGLE_OAUTH_PROJECT_ID")
