@@ -97,21 +97,10 @@ def _load_streamlit_secrets_into_env() -> None:
     """
     Safely load Streamlit secrets into environment variables.
 
-    Handles two layouts that users put in secrets.toml / Streamlit Cloud UI:
-
-    Layout A — flat keys:
-        OPENROUTER_API_KEY = "sk-or-..."
-        GOOGLE_DRIVE_FOLDER_ID = "1Bxi..."
-
-    Layout B — nested GCP service-account section:
-        [gcp_service_account]
-        type = "service_account"
-        project_id = "my-project"
-        private_key = "-----BEGIN RSA PRIVATE KEY-----\\n..."
-        client_email = "sa@project.iam.gserviceaccount.com"
-        ...
-        The function writes credentials.json to BASE_DIR and sets
-        GOOGLE_CREDENTIALS_PATH so drive_service picks it up.
+    Handles:
+    - flat keys like OPENROUTER_API_KEY, GOOGLE_DRIVE_FOLDER_ID
+    - nested OAuth section like [google_oauth_client]
+    - nested GCP service-account section like [gcp_service_account]
     """
 
     try:
@@ -136,7 +125,7 @@ def _load_streamlit_secrets_into_env() -> None:
                 pass
 
         # Pass 1b: scan nested sections for known provider keys
-        _KNOWN_SECRET_KEYS = {
+        known_secret_keys = {
             "OPENROUTER_API_KEY",
             "HUGGINGFACE_API_KEY",
             "HUGGINGFACE_BASE_URL",
@@ -148,13 +137,20 @@ def _load_streamlit_secrets_into_env() -> None:
             "OPENROUTER_RATE_LIMIT_DELAY",
             "GOOGLE_DRIVE_FOLDER_ID",
             "GOOGLE_CREDENTIALS_PATH",
+            "GOOGLE_OAUTH_CLIENT_ID",
+            "GOOGLE_OAUTH_CLIENT_SECRET",
+            "GOOGLE_OAUTH_PROJECT_ID",
+            "GOOGLE_OAUTH_REDIRECT_URI",
+            "GOOGLE_OAUTH_CLIENT_PATH",
+            "GOOGLE_OAUTH_TOKEN_PATH",
         }
 
         def _load_known_secret_keys(item: Any) -> None:
             if not isinstance(item, Mapping):
                 return
+
             for key, value in item.items():
-                if isinstance(value, str) and key in _KNOWN_SECRET_KEYS and value.strip():
+                if isinstance(value, str) and key in known_secret_keys and value.strip():
                     existing = os.getenv(key)
                     if not existing or not existing.strip():
                         os.environ[key] = value
@@ -163,58 +159,82 @@ def _load_streamlit_secrets_into_env() -> None:
 
         _load_known_secret_keys(secrets)
 
-        # Pass 2: look for a GCP service-account section and materialise JSON
-        _GCP_SECTIONS = (
+        # Pass 2: look for a Google service-account section and materialize JSON
+        gcp_sections = (
             "gcp_service_account",
             "google_service_account",
             "GOOGLE_SERVICE_ACCOUNT",
             "GCP_SERVICE_ACCOUNT",
         )
-        for _sec in _GCP_SECTIONS:
+        for sec in gcp_sections:
             try:
-                section = (
-                    secrets.get(_sec)
-                    if hasattr(secrets, "get")
-                    else secrets[_sec]
-                )
+                section = secrets.get(sec) if hasattr(secrets, "get") else secrets[sec]
                 if section is None or not isinstance(section, Mapping):
                     continue
+
                 cred_path = BASE_DIR / "credentials.json"
                 if not cred_path.exists():
                     _write_json_file(cred_path, dict(section))
+
                 existing = os.getenv("GOOGLE_CREDENTIALS_PATH")
                 if not existing or not existing.strip():
                     os.environ["GOOGLE_CREDENTIALS_PATH"] = str(cred_path)
+
                 break
             except (KeyError, Exception):
                 continue
 
         # Pass 3: surface GOOGLE_DRIVE_FOLDER_ID from optional sub-section
-        _DRIVE_KEY = "GOOGLE_DRIVE_FOLDER_ID"
-        if not os.getenv(_DRIVE_KEY) or not os.getenv(_DRIVE_KEY).strip():
-            for _sec in ("google_drive", "GOOGLE_DRIVE", "drive"):
+        drive_key = "GOOGLE_DRIVE_FOLDER_ID"
+        if not os.getenv(drive_key) or not os.getenv(drive_key).strip():
+            for sec in ("google_drive", "GOOGLE_DRIVE", "drive"):
                 try:
-                    section = (
-                        secrets.get(_sec)
-                        if hasattr(secrets, "get")
-                        else secrets[_sec]
-                    )
+                    section = secrets.get(sec) if hasattr(secrets, "get") else secrets[sec]
                     if section is None or not isinstance(section, Mapping):
                         continue
-                    fid = section.get(_DRIVE_KEY) or section.get("folder_id")
+
+                    fid = section.get(drive_key) or section.get("folder_id")
                     if fid and isinstance(fid, str) and fid.strip():
-                        os.environ[_DRIVE_KEY] = fid
+                        os.environ[drive_key] = fid.strip()
                         break
                 except (KeyError, Exception):
                     continue
+
+        # Pass 4: OAuth client section from secrets, if present
+        oauth_sections = (
+            "google_oauth_client",
+            "GOOGLE_OAUTH_CLIENT",
+            "oauth_client",
+            "google_oauth",
+            "gcp_oauth_client",
+        )
+        for sec in oauth_sections:
+            try:
+                section = secrets.get(sec) if hasattr(secrets, "get") else secrets[sec]
+                if section is None or not isinstance(section, Mapping):
+                    continue
+
+                # Allow either a flat section or nested {"web": {...}}
+                if "web" in section and isinstance(section["web"], Mapping):
+                    os.environ.setdefault("GOOGLE_OAUTH_CLIENT_JSON", json.dumps(dict(section)))
+                    break
+
+                if "installed" in section and isinstance(section["installed"], Mapping):
+                    os.environ.setdefault("GOOGLE_OAUTH_CLIENT_JSON", json.dumps(dict(section)))
+                    break
+
+                # Treat plain mapping as the "web" body
+                os.environ.setdefault("GOOGLE_OAUTH_CLIENT_JSON", json.dumps({"web": dict(section)}))
+                break
+
+            except (KeyError, Exception):
+                continue
 
     except Exception:
         return
 
 
-def _get_streamlit_secret_section(
-    name: str,
-) -> dict[str, Any] | None:
+def _get_streamlit_secret_section(name: str) -> dict[str, Any] | None:
     """
     Safely get nested Streamlit secrets section.
     """
@@ -225,49 +245,29 @@ def _get_streamlit_secret_section(
         return None
 
     secrets = getattr(st, "secrets", None)
-
     if secrets is None:
         return None
 
     try:
-        if hasattr(secrets, "get"):
-            section = secrets.get(name)
-        else:
-            section = secrets[name]
-
+        section = secrets.get(name) if hasattr(secrets, "get") else secrets[name]
         if isinstance(section, Mapping):
             return dict(section)
-
     except (KeyError, Exception):
         return None
 
     return None
 
 
-def _write_json_file(
-    path: Path,
-    data: Mapping[str, Any],
-) -> bool:
+def _write_json_file(path: Path, data: Mapping[str, Any]) -> bool:
     """
-    Write JSON credentials safely.
+    Write JSON data safely.
     """
 
     try:
-        path.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
+        path.parent.mkdir(parents=True, exist_ok=True)
 
-        with path.open(
-            "w",
-            encoding="utf-8",
-        ) as file:
-
-            json.dump(
-                dict(data),
-                file,
-                indent=2,
-            )
+        with path.open("w", encoding="utf-8") as file:
+            json.dump(dict(data), file, indent=2)
 
         return True
 
@@ -299,63 +299,26 @@ for directory in (
     VECTORSTORE_DIR,
     LOGS_DIR,
 ):
-    directory.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    directory.mkdir(parents=True, exist_ok=True)
 
 # =============================================================================
 # APP SETTINGS
 # =============================================================================
 
-APP_TITLE = _env_str(
-    "APP_TITLE",
-    "PDF Research Analyzer",
-)
-
-APP_VERSION = _env_str(
-    "APP_VERSION",
-    "1.0.0",
-)
-
-DEBUG = _env_bool(
-    "DEBUG",
-    False,
-)
-
-LOG_LEVEL = _env_str(
-    "LOG_LEVEL",
-    "INFO",
-).upper()
+APP_TITLE = _env_str("APP_TITLE", "PDF Research Analyzer")
+APP_VERSION = _env_str("APP_VERSION", "1.0.0")
+DEBUG = _env_bool("DEBUG", False)
+LOG_LEVEL = _env_str("LOG_LEVEL", "INFO").upper()
 
 # =============================================================================
 # STREAMLIT SETTINGS
 # =============================================================================
 
-STREAMLIT_PAGE_TITLE = _env_str(
-    "STREAMLIT_PAGE_TITLE",
-    APP_TITLE,
-)
-
-STREAMLIT_PAGE_ICON = _env_str(
-    "STREAMLIT_PAGE_ICON",
-    "📚",
-)
-
-STREAMLIT_LAYOUT = _env_str(
-    "STREAMLIT_LAYOUT",
-    "wide",
-)
-
-STREAMLIT_SIDEBAR_STATE = _env_str(
-    "STREAMLIT_SIDEBAR_STATE",
-    "expanded",
-)
-
-MAX_CHAT_HISTORY = _env_int(
-    "MAX_CHAT_HISTORY",
-    20,
-)
+STREAMLIT_PAGE_TITLE = _env_str("STREAMLIT_PAGE_TITLE", APP_TITLE)
+STREAMLIT_PAGE_ICON = _env_str("STREAMLIT_PAGE_ICON", "📚")
+STREAMLIT_LAYOUT = _env_str("STREAMLIT_LAYOUT", "wide")
+STREAMLIT_SIDEBAR_STATE = _env_str("STREAMLIT_SIDEBAR_STATE", "expanded")
+MAX_CHAT_HISTORY = _env_int("MAX_CHAT_HISTORY", 20)
 
 # =============================================================================
 # DATABASE
@@ -366,38 +329,86 @@ DATABASE_URL = _env_str(
     f"sqlite:///{BASE_DIR / 'data' / 'pdf_analyzer.db'}",
 )
 
-SQLALCHEMY_ECHO = _env_bool(
-    "SQLALCHEMY_ECHO",
-    False,
-)
+SQLALCHEMY_ECHO = _env_bool("SQLALCHEMY_ECHO", False)
 
 # =============================================================================
-# GOOGLE DRIVE
+# GOOGLE DRIVE / OAUTH
 # =============================================================================
 
 _raw_folder_id = _env_str("GOOGLE_DRIVE_FOLDER_ID")
-
 GOOGLE_DRIVE_FOLDER_ID = (
     _raw_folder_id.rstrip("/").split("/")[-1]
     if _raw_folder_id.startswith("http")
     else _raw_folder_id
 )
 
-GOOGLE_CREDENTIALS_PATH = _env_str(
-    "GOOGLE_CREDENTIALS_PATH",
-    "credentials.json",
-)
+# Service account fallback (kept for compatibility)
+GOOGLE_CREDENTIALS_PATH = _env_str("GOOGLE_CREDENTIALS_PATH", "credentials.json")
+GOOGLE_CREDENTIALS_SECRET_SECTION = _env_str("GOOGLE_CREDENTIALS_SECRET_SECTION", "gcp_service_account")
+GOOGLE_CREDENTIALS_JSON = _env_str("GOOGLE_CREDENTIALS_JSON")
 
-GOOGLE_CREDENTIALS_SECRET_SECTION = _env_str(
-    "GOOGLE_CREDENTIALS_SECRET_SECTION",
-    "gcp_service_account",
+# OAuth web app settings
+GOOGLE_OAUTH_CLIENT_SECTION = _env_str("GOOGLE_OAUTH_CLIENT_SECTION", "google_oauth_client")
+GOOGLE_OAUTH_CLIENT_PATH = _env_str("GOOGLE_OAUTH_CLIENT_PATH", str(DATA_DIR / "google_oauth_client.json"))
+GOOGLE_OAUTH_TOKEN_PATH = _env_str("GOOGLE_OAUTH_TOKEN_PATH", str(DATA_DIR / "google_oauth_token.json"))
+GOOGLE_OAUTH_REDIRECT_URI = _env_str("GOOGLE_OAUTH_REDIRECT_URI", "http://localhost:8501/")
+GOOGLE_OAUTH_CLIENT_ID = _env_str("GOOGLE_OAUTH_CLIENT_ID")
+GOOGLE_OAUTH_CLIENT_SECRET = _env_str("GOOGLE_OAUTH_CLIENT_SECRET")
+GOOGLE_OAUTH_PROJECT_ID = _env_str("GOOGLE_OAUTH_PROJECT_ID")
+GOOGLE_OAUTH_AUTH_URI = _env_str("GOOGLE_OAUTH_AUTH_URI", "https://accounts.google.com/o/oauth2/auth")
+GOOGLE_OAUTH_TOKEN_URI = _env_str("GOOGLE_OAUTH_TOKEN_URI", "https://oauth2.googleapis.com/token")
+GOOGLE_OAUTH_AUTH_PROVIDER_X509_CERT_URL = _env_str(
+    "GOOGLE_OAUTH_AUTH_PROVIDER_X509_CERT_URL",
+    "https://www.googleapis.com/oauth2/v1/certs",
 )
+GOOGLE_OAUTH_CLIENT_X509_CERT_URL = _env_str("GOOGLE_OAUTH_CLIENT_X509_CERT_URL")
+GOOGLE_OAUTH_CLIENT_JSON = _env_str("GOOGLE_OAUTH_CLIENT_JSON")
+
+
+def _build_google_oauth_client_json() -> str:
+    """
+    Assemble OAuth client JSON from env vars or secrets when a raw JSON blob is
+    not already provided.
+    """
+    raw = GOOGLE_OAUTH_CLIENT_JSON.strip()
+    if raw:
+        return raw
+
+    if GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET:
+        payload: dict[str, Any] = {
+            "web": {
+                "client_id": GOOGLE_OAUTH_CLIENT_ID,
+                "client_secret": GOOGLE_OAUTH_CLIENT_SECRET,
+                "auth_uri": GOOGLE_OAUTH_AUTH_URI,
+                "token_uri": GOOGLE_OAUTH_TOKEN_URI,
+                "auth_provider_x509_cert_url": GOOGLE_OAUTH_AUTH_PROVIDER_X509_CERT_URL,
+                "redirect_uris": [GOOGLE_OAUTH_REDIRECT_URI],
+            }
+        }
+        if GOOGLE_OAUTH_PROJECT_ID:
+            payload["web"]["project_id"] = GOOGLE_OAUTH_PROJECT_ID  # type: ignore[index]
+        if GOOGLE_OAUTH_CLIENT_X509_CERT_URL:
+            payload["web"]["client_x509_cert_url"] = GOOGLE_OAUTH_CLIENT_X509_CERT_URL  # type: ignore[index]
+        return json.dumps(payload)
+
+    section = _get_streamlit_secret_section(GOOGLE_OAUTH_CLIENT_SECTION)
+    if section:
+        if "web" in section and isinstance(section["web"], Mapping):
+            return json.dumps(section)
+        if "installed" in section and isinstance(section["installed"], Mapping):
+            return json.dumps(section)
+
+        payload = {"web": dict(section)}
+        if not payload["web"].get("redirect_uris"):
+            payload["web"]["redirect_uris"] = [GOOGLE_OAUTH_REDIRECT_URI]
+        return json.dumps(payload)
+
+    return ""
 
 
 def _build_google_credentials_json() -> str:
     """
-    Assembles Google credentials JSON from individual env vars 
-    (type, project_id, private_key, etc.) or falls back to existing methods.
+    Assemble Google service-account JSON from env vars or secrets.
     """
     gc_keys = [
         "type",
@@ -412,176 +423,132 @@ def _build_google_credentials_json() -> str:
         "client_x509_cert_url",
         "universe_domain",
     ]
-    
-    creds_dict = {}
+
+    creds_dict: dict[str, str] = {}
+
     for key in gc_keys:
         val = _env_str(key)
         if val:
             if key == "private_key":
                 val = val.replace("\\n", "\n")
             creds_dict[key] = val
-            
+
     if creds_dict.get("private_key") and creds_dict.get("client_email"):
         return json.dumps(creds_dict)
-    
+
+    section = _get_streamlit_secret_section(GOOGLE_CREDENTIALS_SECRET_SECTION)
+    if section:
+        return json.dumps(section)
+
     return ""
 
 
-GOOGLE_CREDENTIALS_JSON = _env_str("GOOGLE_CREDENTIALS_JSON") or _build_google_credentials_json()
+def _materialize_google_oauth_client_file() -> None:
+    """
+    Create the OAuth client JSON file if enough info is available.
+    """
+    cred_path = _resolved_path(GOOGLE_OAUTH_CLIENT_PATH)
+
+    if cred_path.exists():
+        return
+
+    raw_json = _build_google_oauth_client_json()
+    if not raw_json:
+        return
+
+    try:
+        parsed = json.loads(raw_json)
+        if isinstance(parsed, dict):
+            _write_json_file(cred_path, parsed)
+            os.environ.setdefault("GOOGLE_OAUTH_CLIENT_PATH", str(cred_path))
+    except Exception:
+        return
 
 
 def _materialize_google_credentials_file() -> None:
     """
-    Create Google credentials file from:
-    1. Existing credentials file
-    2. GOOGLE_CREDENTIALS_JSON env var / assembled keys
-    3. Streamlit secrets section
+    Create the service-account credentials file if enough info is available.
     """
+    cred_path = _resolved_path(GOOGLE_CREDENTIALS_PATH)
 
-    cred_path = _resolved_path(
-        GOOGLE_CREDENTIALS_PATH
-    )
-
-    # Already exists
     if cred_path.exists():
         return
 
-    # Try JSON env variable or assembled individual keys
-    raw_json = GOOGLE_CREDENTIALS_JSON
+    raw_json = GOOGLE_CREDENTIALS_JSON or _build_google_credentials_json()
+    if not raw_json:
+        return
 
-    if raw_json:
-        try:
-            parsed = json.loads(raw_json)
-
-            if isinstance(parsed, dict):
-
-                _write_json_file(
-                    cred_path,
-                    parsed,
-                )
-
-                return
-
-        except Exception:
-            pass
-
-    # Try Streamlit secrets
-    secret_section = _get_streamlit_secret_section(
-        GOOGLE_CREDENTIALS_SECRET_SECTION
-    )
-
-    if secret_section:
-
-        _write_json_file(
-            cred_path,
-            secret_section,
-        )
+    try:
+        parsed = json.loads(raw_json)
+        if isinstance(parsed, dict):
+            _write_json_file(cred_path, parsed)
+            os.environ.setdefault("GOOGLE_CREDENTIALS_PATH", str(cred_path))
+    except Exception:
+        return
 
 
+_materialize_google_oauth_client_file()
 _materialize_google_credentials_file()
 
 
 def is_drive_sync_configured() -> bool:
     """
-    Returns True when *both* conditions are met:
-      1. GOOGLE_DRIVE_FOLDER_ID is set (non-empty after env / secrets load)
-      2. The credentials JSON file exists at GOOGLE_CREDENTIALS_PATH
+    Returns True when GOOGLE_DRIVE_FOLDER_ID is set and at least one valid
+    auth artifact is available.
 
-    Called at runtime (not at import time) so it reflects the state *after*
-    Streamlit secrets have been loaded and credentials have been materialised.
+    For OAuth, this is enough to show the Drive UI as configured even before
+    the first token exchange.
     """
     folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "").strip()
     if not folder_id:
         return False
 
-    creds_raw = os.getenv("GOOGLE_CREDENTIALS_PATH", "credentials.json").strip()
-    creds_path = Path(creds_raw) if os.path.isabs(creds_raw) else BASE_DIR / creds_raw
-    if creds_path.exists():
-        return True
+    oauth_client_raw = os.getenv("GOOGLE_OAUTH_CLIENT_PATH", GOOGLE_OAUTH_CLIENT_PATH).strip()
+    oauth_token_raw = os.getenv("GOOGLE_OAUTH_TOKEN_PATH", GOOGLE_OAUTH_TOKEN_PATH).strip()
+    sa_raw = os.getenv("GOOGLE_CREDENTIALS_PATH", GOOGLE_CREDENTIALS_PATH).strip()
 
-    # Also check the default materialisation location
-    default_creds = BASE_DIR / "credentials.json"
-    return default_creds.exists()
+    oauth_client_path = Path(oauth_client_raw) if os.path.isabs(oauth_client_raw) else BASE_DIR / oauth_client_raw
+    oauth_token_path = Path(oauth_token_raw) if os.path.isabs(oauth_token_raw) else BASE_DIR / oauth_token_raw
+    sa_path = Path(sa_raw) if os.path.isabs(sa_raw) else BASE_DIR / sa_raw
+
+    return any(
+        path.exists()
+        for path in (oauth_client_path, oauth_token_path, sa_path)
+    )
 
 
 # =============================================================================
 # OPENROUTER
 # =============================================================================
 
-OPENROUTER_API_KEY = _env_str(
-    "OPENROUTER_API_KEY"
-)
-
-OPENROUTER_BASE_URL = _env_str(
-    "OPENROUTER_BASE_URL",
-    "https://openrouter.ai/api/v1",
-)
-
-OPENROUTER_MODEL = _env_str(
-    "OPENROUTER_MODEL",
-    "openrouter/free",
-)
-
-OPENROUTER_TIMEOUT = _env_int(
-    "OPENROUTER_TIMEOUT",
-    90,
-)
-
-OPENROUTER_RATE_LIMIT_DELAY = _env_float(
-    "OPENROUTER_RATE_LIMIT_DELAY",
-    10.0,
-)
+OPENROUTER_API_KEY = _env_str("OPENROUTER_API_KEY")
+OPENROUTER_BASE_URL = _env_str("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_MODEL = _env_str("OPENROUTER_MODEL", "openrouter/free")
+OPENROUTER_TIMEOUT = _env_int("OPENROUTER_TIMEOUT", 90)
+OPENROUTER_RATE_LIMIT_DELAY = _env_float("OPENROUTER_RATE_LIMIT_DELAY", 10.0)
 
 # =============================================================================
 # HUGGINGFACE
 # =============================================================================
 
-HUGGINGFACE_API_KEY = _env_str(
-    "HUGGINGFACE_API_KEY"
-)
-
-HUGGINGFACE_BASE_URL = _env_str(
-    "HUGGINGFACE_BASE_URL",
-    "https://router.huggingface.co/v1",
-)
-
-HUGGINGFACE_MODEL = _env_str(
-    "HUGGINGFACE_MODEL",
-    "meta-llama/Llama-3.1-8B-Instruct:cerebras",
-)
-
-HUGGINGFACE_TIMEOUT = _env_int(
-    "HUGGINGFACE_TIMEOUT",
-    90,
-)
+HUGGINGFACE_API_KEY = _env_str("HUGGINGFACE_API_KEY")
+HUGGINGFACE_BASE_URL = _env_str("HUGGINGFACE_BASE_URL", "https://router.huggingface.co/v1")
+HUGGINGFACE_MODEL = _env_str("HUGGINGFACE_MODEL", "meta-llama/Llama-3.1-8B-Instruct:cerebras")
+HUGGINGFACE_TIMEOUT = _env_int("HUGGINGFACE_TIMEOUT", 90)
 
 # =============================================================================
 # EMBEDDINGS
 # =============================================================================
 
-EMBEDDING_MODEL = _env_str(
-    "EMBEDDING_MODEL",
-    "sentence-transformers/all-MiniLM-L6-v2",
-)
-
-EMBEDDING_DIMENSION = _env_int(
-    "EMBEDDING_DIMENSION",
-    384,
-)
+EMBEDDING_MODEL = _env_str("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+EMBEDDING_DIMENSION = _env_int("EMBEDDING_DIMENSION", 384)
 
 # =============================================================================
 # CHUNKING
 # =============================================================================
 
-CHUNK_SIZE = _env_int(
-    "CHUNK_SIZE",
-    500,
-)
-
-CHUNK_OVERLAP = _env_int(
-    "CHUNK_OVERLAP",
-    50,
-)
+CHUNK_SIZE = _env_int("CHUNK_SIZE", 500)
+CHUNK_OVERLAP = _env_int("CHUNK_OVERLAP", 50)
 
 SECTION_KEYWORDS: dict[str, list[str]] = {
     "abstract": [
@@ -632,80 +599,38 @@ SECTION_KEYWORDS: dict[str, list[str]] = {
     ],
 }
 
-MIN_CHUNK_LENGTH = _env_int(
-    "MIN_CHUNK_LENGTH",
-    50,
-)
+MIN_CHUNK_LENGTH = _env_int("MIN_CHUNK_LENGTH", 50)
 
 # =============================================================================
 # RETRIEVAL
 # =============================================================================
 
-TOP_K_RESULTS = _env_int(
-    "TOP_K_RESULTS",
-    8,
-)
-
-SIMILARITY_THRESHOLD = _env_float(
-    "SIMILARITY_THRESHOLD",
-    0.05,
-)
+TOP_K_RESULTS = _env_int("TOP_K_RESULTS", 8)
+SIMILARITY_THRESHOLD = _env_float("SIMILARITY_THRESHOLD", 0.05)
 
 # =============================================================================
 # GENERATION
 # =============================================================================
 
-MAX_TOKENS = _env_int(
-    "MAX_TOKENS",
-    2048,
-)
-
-TEMPERATURE = _env_float(
-    "TEMPERATURE",
-    0.3,
-)
-
-CONTEXT_WINDOW_TOKENS = _env_int(
-    "CONTEXT_WINDOW_TOKENS",
-    6000,
-)
+MAX_TOKENS = _env_int("MAX_TOKENS", 2048)
+TEMPERATURE = _env_float("TEMPERATURE", 0.3)
+CONTEXT_WINDOW_TOKENS = _env_int("CONTEXT_WINDOW_TOKENS", 6000)
 
 # =============================================================================
 # RETRY
 # =============================================================================
 
-RETRY_MAX_ATTEMPTS = _env_int(
-    "RETRY_MAX_ATTEMPTS",
-    3,
-)
-
-RETRY_BASE_DELAY = _env_float(
-    "RETRY_BASE_DELAY",
-    1.0,
-)
-
-RETRY_MAX_DELAY = _env_float(
-    "RETRY_MAX_DELAY",
-    60.0,
-)
-
-RETRY_BACKOFF_FACTOR = _env_float(
-    "RETRY_BACKOFF_FACTOR",
-    2.0,
-)
+RETRY_MAX_ATTEMPTS = _env_int("RETRY_MAX_ATTEMPTS", 3)
+RETRY_BASE_DELAY = _env_float("RETRY_BASE_DELAY", 1.0)
+RETRY_MAX_DELAY = _env_float("RETRY_MAX_DELAY", 60.0)
+RETRY_BACKOFF_FACTOR = _env_float("RETRY_BACKOFF_FACTOR", 2.0)
 
 # =============================================================================
 # UPLOAD SETTINGS
 # =============================================================================
 
-MAX_FILE_SIZE_MB = _env_int(
-    "MAX_FILE_SIZE_MB",
-    50,
-)
-
-MAX_FILE_SIZE_BYTES = (
-    MAX_FILE_SIZE_MB * 1024 * 1024
-)
+MAX_FILE_SIZE_MB = _env_int("MAX_FILE_SIZE_MB", 50)
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
 ALLOWED_EXTENSIONS = {
     ".pdf",
@@ -721,38 +646,21 @@ ALLOWED_EXTENSIONS = {
 # VECTORSTORE SETTINGS
 # =============================================================================
 
-VECTORSTORE_COLLECTION_NAME = _env_str(
-    "VECTORSTORE_COLLECTION_NAME",
-    "pdf_research_chunks",
-)
+VECTORSTORE_COLLECTION_NAME = _env_str("VECTORSTORE_COLLECTION_NAME", "pdf_research_chunks")
 
 # =============================================================================
 # CACHE SETTINGS
 # =============================================================================
 
-ENABLE_CACHE = _env_bool(
-    "ENABLE_CACHE",
-    True,
-)
-
-CACHE_TTL_SECONDS = _env_int(
-    "CACHE_TTL_SECONDS",
-    3600,
-)
+ENABLE_CACHE = _env_bool("ENABLE_CACHE", True)
+CACHE_TTL_SECONDS = _env_int("CACHE_TTL_SECONDS", 3600)
 
 # =============================================================================
 # UI SETTINGS
 # =============================================================================
 
-DEFAULT_THEME = _env_str(
-    "DEFAULT_THEME",
-    "light",
-)
-
-SHOW_DEBUG_INFO = _env_bool(
-    "SHOW_DEBUG_INFO",
-    False,
-)
+DEFAULT_THEME = _env_str("DEFAULT_THEME", "light")
+SHOW_DEBUG_INFO = _env_bool("SHOW_DEBUG_INFO", False)
 
 # =============================================================================
 # VALIDATION
@@ -773,20 +681,14 @@ def validate_config() -> list[str]:
 
     if CHUNK_OVERLAP >= CHUNK_SIZE:
         issues.append(
-            f"CHUNK_OVERLAP ({CHUNK_OVERLAP}) "
-            f"must be less than CHUNK_SIZE "
-            f"({CHUNK_SIZE})"
+            f"CHUNK_OVERLAP ({CHUNK_OVERLAP}) must be less than CHUNK_SIZE ({CHUNK_SIZE})"
         )
 
     if MAX_FILE_SIZE_MB <= 0:
-        issues.append(
-            "MAX_FILE_SIZE_MB must be greater than 0"
-        )
+        issues.append("MAX_FILE_SIZE_MB must be greater than 0")
 
     if TOP_K_RESULTS <= 0:
-        issues.append(
-            "TOP_K_RESULTS must be greater than 0"
-        )
+        issues.append("TOP_K_RESULTS must be greater than 0")
 
     return issues
 
@@ -814,6 +716,7 @@ def get_config_summary() -> dict[str, str | int | bool]:
         "max_tokens": MAX_TOKENS,
         "temperature": TEMPERATURE,
         "max_file_size_mb": MAX_FILE_SIZE_MB,
+        "drive_sync_configured": is_drive_sync_configured(),
     }
 
 
@@ -850,6 +753,20 @@ __all__ = [
     # Google
     "GOOGLE_DRIVE_FOLDER_ID",
     "GOOGLE_CREDENTIALS_PATH",
+    "GOOGLE_CREDENTIALS_SECRET_SECTION",
+    "GOOGLE_CREDENTIALS_JSON",
+    "GOOGLE_OAUTH_CLIENT_SECTION",
+    "GOOGLE_OAUTH_CLIENT_PATH",
+    "GOOGLE_OAUTH_TOKEN_PATH",
+    "GOOGLE_OAUTH_REDIRECT_URI",
+    "GOOGLE_OAUTH_CLIENT_ID",
+    "GOOGLE_OAUTH_CLIENT_SECRET",
+    "GOOGLE_OAUTH_PROJECT_ID",
+    "GOOGLE_OAUTH_AUTH_URI",
+    "GOOGLE_OAUTH_TOKEN_URI",
+    "GOOGLE_OAUTH_AUTH_PROVIDER_X509_CERT_URL",
+    "GOOGLE_OAUTH_CLIENT_X509_CERT_URL",
+    "GOOGLE_OAUTH_CLIENT_JSON",
     "is_drive_sync_configured",
 
     # OpenRouter
