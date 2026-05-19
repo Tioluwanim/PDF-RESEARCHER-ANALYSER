@@ -121,9 +121,6 @@ class DriveService:
         if not svc or not folder_id:
             return []
 
-        mime_clauses = " or ".join(
-            f"mimeType='{mime_type}'" for mime_type in SUPPORTED_DRIVE_MIME_TYPES + [FOLDER_MIME_TYPE]
-        )
         files: list[dict] = []
         folders = [folder_id]
 
@@ -132,7 +129,7 @@ class DriveService:
                 parent_id = folders.pop(0)
                 page_token = None
                 while True:
-                    query = f"'{parent_id}' in parents and trashed=false and ({mime_clauses})"
+                    query = f"'{parent_id}' in parents and trashed=false"
                     response = (
                         svc.files()
                         .list(
@@ -144,9 +141,12 @@ class DriveService:
                         .execute()
                     )
                     for item in response.get("files", []):
-                        if item.get("mimeType") == FOLDER_MIME_TYPE:
+                        mime_type = item.get("mimeType")
+                        if mime_type == FOLDER_MIME_TYPE:
                             folders.append(item["id"])
-                        else:
+                        elif mime_type in SUPPORTED_DRIVE_MIME_TYPES or (
+                            isinstance(mime_type, str) and mime_type.startswith("application/vnd.google-apps.")
+                        ):
                             files.append(item)
                     page_token = response.get("nextPageToken")
                     if not page_token:

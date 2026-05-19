@@ -137,8 +137,18 @@ def _render_sync() -> None:
         else:
             st.warning("Please paste a Google Drive folder URL first.")
 
+    folder_info = {} if not drive_service.is_configured else drive_service.get_folder_info()
     if drive_service.is_configured:
-        st.caption(f"✓ Ready to sync — folder: `{drive_service.folder_id}`")
+        if folder_info:
+            st.caption(
+                f"✓ Ready to sync — folder: `{drive_service.folder_id}` (name: {folder_info.get('name', 'unknown')})"
+            )
+        else:
+            st.warning(
+                "Drive folder is saved, but folder metadata could not be read. "
+                "Confirm the service account has access to the folder.",
+                icon="⚠️",
+            )
     elif creds_ok and not current_folder:
         st.caption("Paste your Drive folder URL above and click Save to enable sync.")
 
@@ -176,6 +186,14 @@ def _render_sync() -> None:
         progress.info("Rebuilding library index…")
         analysis_service.rebuild_library_index()
         progress.empty()
+
+        if result.get("total", 0) == 0 and not result.get("error"):
+            st.warning(
+                "Sync completed with zero files discovered. "
+                "Check that the saved Drive folder contains supported documents and that the service account has access.",
+                icon="⚠️",
+            )
+
         st.success(
             f"Sync complete: {result.get('new', 0)} changed, "
             f"{result.get('skipped', 0)} skipped, {result.get('failed', 0)} failed. "
