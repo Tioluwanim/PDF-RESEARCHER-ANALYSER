@@ -133,7 +133,7 @@ def _render_catalog() -> None:
 
     st.dataframe(
         rows,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -240,7 +240,7 @@ def _render_sync() -> None:
         )
     with col_save:
         st.markdown("<div style='padding-top:1.75rem;'>", unsafe_allow_html=True)
-        if st.button("Save", use_container_width=True, key="drive_folder_save"):
+        if st.button("Save", width="stretch", key="drive_folder_save"):
             if not folder_input.strip():
                 st.warning("Paste a Google Drive folder URL first.")
             else:
@@ -346,7 +346,7 @@ token_uri = "https://oauth2.googleapis.com/token"
         if auth_url:
             # Store the redirect URI so exchange can use the exact same value
             st.session_state["_oauth_redirect_uri"] = redirect_uri
-            st.link_button("🔐 Sign in with Google", auth_url, use_container_width=True)
+            st.link_button("🔐 Sign in with Google", auth_url, width="stretch")
 
             st.markdown("---")
             st.caption(
@@ -407,7 +407,7 @@ token_uri = "https://oauth2.googleapis.com/token"
 
     col_sync, col_rebuild = st.columns([3, 1])
     with col_rebuild:
-        if st.button("Rebuild index", use_container_width=True, key="library_rebuild_index"):
+        if st.button("Rebuild index", width="stretch", key="library_rebuild_index"):
             ok = analysis_service.rebuild_library_index()
             st.success("Library index rebuilt.") if ok else st.warning("No embedded chunks found.")
 
@@ -415,7 +415,7 @@ token_uri = "https://oauth2.googleapis.com/token"
         if st.button(
             "🔄 Sync Drive and process new files",
             type="primary",
-            use_container_width=True,
+            width="stretch",
             disabled=not sync_ready,
             key="library_drive_sync",
             help="Complete Steps 1 & 2 first." if not sync_ready else "Sync new or changed PDFs from Drive.",
@@ -435,7 +435,7 @@ token_uri = "https://oauth2.googleapis.com/token"
                 progress.empty()
                 st.error(result["error"])
                 if result.get("authorization_url"):
-                    st.link_button("Authenticate with Google", result["authorization_url"], use_container_width=True)
+                    st.link_button("Authenticate with Google", result["authorization_url"], width="stretch")
             else:
                 jobs = analysis_service.process_pending_ingestion_jobs(
                     limit=100, on_progress=_on_job_progress
@@ -478,7 +478,7 @@ token_uri = "https://oauth2.googleapis.com/token"
                 }
                 for r in runs
             ],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -792,7 +792,7 @@ def _render_export_readiness() -> None:
                 }
                 for doc in ready
             ],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -811,7 +811,7 @@ def _render_logs() -> None:
 
     st.dataframe(
         rows,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 

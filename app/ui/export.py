@@ -66,7 +66,7 @@ def render_export_tab() -> None:
     with c1:
         st.markdown("**📊 Excel (XLSX)**")
         st.caption("Matches your metadata template")
-        if st.button("Generate XLSX", type="primary", use_container_width=True, key="gen_xlsx"):
+        if st.button("Generate XLSX", type="primary", width="stretch", key="gen_xlsx"):
             with st.spinner("Building …"):
                 try:
                     export_cache["xlsx"] = export_service.export_xlsx(
@@ -81,13 +81,13 @@ def render_export_tab() -> None:
             st.download_button(
                 "⬇ Download XLSX", data=data, file_name=fname,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True, key="dl_xlsx",
+                width="stretch", key="dl_xlsx",
             )
 
     with c2:
         st.markdown("**📝 Word (DOCX)**")
         st.caption("Formatted report per document")
-        if st.button("Generate DOCX", type="primary", use_container_width=True, key="gen_docx"):
+        if st.button("Generate DOCX", type="primary", width="stretch", key="gen_docx"):
             with st.spinner("Building …"):
                 try:
                     export_cache["docx"] = export_service.export_docx(
@@ -102,13 +102,13 @@ def render_export_tab() -> None:
             st.download_button(
                 "⬇ Download DOCX", data=data, file_name=fname,
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True, key="dl_docx",
+                width="stretch", key="dl_docx",
             )
 
     with c3:
         st.markdown("**📋 CSV**")
         st.caption("Plain text, importable anywhere")
-        if st.button("Generate CSV", type="primary", use_container_width=True, key="gen_csv"):
+        if st.button("Generate CSV", type="primary", width="stretch", key="gen_csv"):
             with st.spinner("Building …"):
                 try:
                     export_cache["csv"] = export_service.export_csv(
@@ -122,13 +122,13 @@ def render_export_tab() -> None:
             data, fname = export_cache["csv"]
             st.download_button(
                 "⬇ Download CSV", data=data, file_name=fname,
-                mime="text/csv", use_container_width=True, key="dl_csv",
+                mime="text/csv", width="stretch", key="dl_csv",
             )
 
     with c4:
         st.markdown("**🔗 JSON**")
         st.caption("For API / integration use")
-        if st.button("Generate JSON", type="primary", use_container_width=True, key="gen_json"):
+        if st.button("Generate JSON", type="primary", width="stretch", key="gen_json"):
             with st.spinner("Building …"):
                 try:
                     export_cache["json"] = export_service.export_json(
@@ -142,7 +142,7 @@ def render_export_tab() -> None:
             data, fname = export_cache["json"]
             st.download_button(
                 "⬇ Download JSON", data=data, file_name=fname,
-                mime="application/json", use_container_width=True, key="dl_json",
+                mime="application/json", width="stretch", key="dl_json",
             )
 
     st.markdown("<br>", unsafe_allow_html=True)

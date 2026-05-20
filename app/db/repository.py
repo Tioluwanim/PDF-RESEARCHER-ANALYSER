@@ -210,6 +210,9 @@ class Repository:
         modified_time: datetime | None,
         file_size_bytes: int,
         status: DocumentStatus,
+        drive_file_id: str | None = None,
+        source_folder: str | None = None,
+        source: str | None = None,
     ) -> bool:
         with self.session() as session:
             record = session.execute(select(Document).where(Document.doc_id == doc_id)).scalar_one_or_none()
@@ -220,11 +223,17 @@ class Repository:
             record.modified_time = modified_time
             record.file_size_bytes = file_size_bytes
             record.status = status.value
+            if drive_file_id is not None:
+                record.drive_file_id = drive_file_id
+            if source_folder is not None:
+                record.source_folder = source_folder
+            if source is not None:
+                record.source = source
             record.updated_at = datetime.utcnow()
             self._create_version(
                 session=session,
                 document=record,
-                source="drive",
+                source=source or "drive",
                 checksum=checksum,
                 modified_time=modified_time,
             )
@@ -525,6 +534,7 @@ class Repository:
                 return
             record.status = status
             record.new_files = new_files
+            record.updated_files = updated_files
             record.skipped_files = skipped_files
             record.failed_files = failed_files
             record.completed_at = datetime.utcnow()

@@ -125,6 +125,7 @@ class SyncRun(Base):
     status        = Column(String(32),   default="running", nullable=False)
     total_files   = Column(Integer,      default=0,         nullable=False)
     new_files     = Column(Integer,      default=0,         nullable=False)
+    updated_files = Column(Integer,      default=0,         nullable=False)
     skipped_files = Column(Integer,      default=0,         nullable=False)
     failed_files  = Column(Integer,      default=0,         nullable=False)
     started_at    = Column(DateTime,     default=datetime.utcnow, nullable=False)
