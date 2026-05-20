@@ -6,30 +6,30 @@ Key improvements:
   preventing expensive reloads on every Streamlit rerun
 - Suppresses all HuggingFace/transformers noise before any import
 - Batch size auto-tuned based on chunk count
+- Graceful fallback encoder if Sentence Transformers cannot load
 """
 
 from __future__ import annotations
 
-import os
+import hashlib
 import logging
+import os
+import re
 from typing import Optional
 
 import numpy as np
 
-# Silence all HF noise — set before sentence_transformers loads on first use
-os.environ.setdefault("TOKENIZERS_PARALLELISM",        "false")
+# Silence HF noise before any optional model import happens.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
-os.environ.setdefault("TRANSFORMERS_VERBOSITY",        "error")
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 logging.getLogger("transformers").setLevel(logging.ERROR)
 logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
 logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
 
-# sentence_transformers is imported LAZILY inside _get_or_load_model so that
-# importing this module never fails if the package is not installed yet.
-
-from app.config import EMBEDDING_MODEL, EMBEDDING_DIMENSION
+from app.config import EMBEDDING_DIMENSION, EMBEDDING_MODEL
 from app.models.schemas import TextChunk
-from app.utils.logger import get_logger, ServiceLogger
+from app.utils.logger import ServiceLogger, get_logger
 
 logger = get_logger(__name__)
 
@@ -37,26 +37,117 @@ _ST_CACHE_KEY = "_embedding_model_singleton"
 _module_model_cache: Optional[object] = None
 
 
-def _get_or_load_model(model_name: str):
-    """Load SentenceTransformer lazily — only when embeddings are first needed."""
-    from sentence_transformers import SentenceTransformer  # lazy import
+class _FallbackEmbeddingModel:
+    """
+    Deterministic local fallback for environments where Sentence Transformers
+    cannot load. Produces normalized hashing-based vectors so the app keeps
+    working instead of hard-failing during index build.
+    """
+
+    def __init__(self, dimension: int) -> None:
+        self.dimension = int(dimension)
+
+    def encode(
+        self,
+        texts,
+        batch_size: int = 32,
+        show_progress_bar: bool = False,
+        convert_to_numpy: bool = True,
+        normalize_embeddings: bool = True,
+    ):
+        if isinstance(texts, str):
+            texts = [texts]
+
+        vectors: list[np.ndarray] = []
+
+        for text in texts:
+            vec = np.zeros(self.dimension, dtype=np.float32)
+            cleaned = (text or "").strip()
+
+            if cleaned:
+                tokens = re.findall(r"[A-Za-z0-9_']+", cleaned.lower())
+                if not tokens:
+                    tokens = [cleaned.lower()]
+
+                for token in tokens:
+                    digest = hashlib.blake2b(
+                        token.encode("utf-8"),
+                        digest_size=16,
+                    ).digest()
+
+                    idx = int.from_bytes(digest[:4], "little") % self.dimension
+                    sign = 1.0 if (digest[4] % 2 == 0) else -1.0
+                    weight = 1.0 + (digest[5] / 255.0)
+                    vec[idx] += sign * weight
+
+            if normalize_embeddings:
+                norm = float(np.linalg.norm(vec))
+                if norm > 0:
+                    vec /= norm
+
+            vectors.append(vec)
+
+        if convert_to_numpy:
+            return np.vstack(vectors) if vectors else np.empty((0, self.dimension), dtype=np.float32)
+
+        return vectors
+
+
+def _store_model(model: object) -> None:
+    global _module_model_cache
 
     try:
         import streamlit as st
-        if _ST_CACHE_KEY not in st.session_state:
-            logger.info("Loading embedding model '%s' …", model_name)
-            st.session_state[_ST_CACHE_KEY] = SentenceTransformer(model_name)
-            logger.info("Embedding model loaded and cached in session state ✓")
-        return st.session_state[_ST_CACHE_KEY]
+
+        st.session_state[_ST_CACHE_KEY] = model
+        return
+    except Exception:
+        pass
+
+    _module_model_cache = model
+
+
+def _load_sentence_transformer_model(model_name: str):
+    """
+    Load SentenceTransformer lazily. This is only called when embeddings are
+    actually needed.
+    """
+    from sentence_transformers import SentenceTransformer
+
+    return SentenceTransformer(model_name)
+
+
+def _get_or_load_model(model_name: str):
+    """Load SentenceTransformer lazily — only when embeddings are first needed."""
+    try:
+        import streamlit as st
+
+        if _ST_CACHE_KEY in st.session_state:
+            return st.session_state[_ST_CACHE_KEY]
     except Exception:
         pass
 
     global _module_model_cache
-    if _module_model_cache is None:
+    if _module_model_cache is not None:
+        return _module_model_cache
+
+    try:
         logger.info("Loading embedding model '%s' …", model_name)
-        _module_model_cache = SentenceTransformer(model_name)
+        model = _load_sentence_transformer_model(model_name)
         logger.info("Embedding model loaded ✓")
-    return _module_model_cache
+    except Exception as exc:
+        logger.exception(
+            "SentenceTransformer load failed for '%s'; using fallback encoder: %s",
+            model_name,
+            exc,
+        )
+        model = _FallbackEmbeddingModel(EMBEDDING_DIMENSION)
+        logger.warning(
+            "Fallback hashing embeddings active. Retrieval quality may be lower."
+        )
+
+    _store_model(model)
+    return model
 
 
 class EmbeddingService:
@@ -67,7 +158,8 @@ class EmbeddingService:
 
     def __init__(self) -> None:
         self._model_name = EMBEDDING_MODEL
-        self._dimension  = EMBEDDING_DIMENSION
+        self._dimension = EMBEDDING_DIMENSION
+        self._dimension_verified = False
         logger.info("EmbeddingService ready (model will load on first use)")
 
     # ── Model property ────────────────────────────────────────────────────────
@@ -75,25 +167,45 @@ class EmbeddingService:
     @property
     def model(self):
         m = _get_or_load_model(self._model_name)
-        # Sync dimension on first load
-        if self._dimension == EMBEDDING_DIMENSION:
-            probe  = m.encode(["probe"], show_progress_bar=False)
-            actual = int(probe.shape[1])
-            if actual != self._dimension:
-                logger.warning(
-                    "Embedding dimension mismatch: config=%d actual=%d",
-                    self._dimension, actual,
+
+        if not self._dimension_verified:
+            try:
+                probe = m.encode(
+                    ["probe"],
+                    show_progress_bar=False,
+                    convert_to_numpy=True,
+                    normalize_embeddings=True,
                 )
-                self._dimension = actual
+                probe_arr = np.asarray(probe)
+
+                if probe_arr.ndim == 1:
+                    actual = int(probe_arr.shape[0])
+                elif probe_arr.ndim >= 2:
+                    actual = int(probe_arr.shape[-1])
+                else:
+                    actual = self._dimension
+
+                if actual != self._dimension:
+                    logger.warning(
+                        "Embedding dimension mismatch: config=%d actual=%d",
+                        self._dimension,
+                        actual,
+                    )
+                    self._dimension = actual
+            except Exception as exc:
+                logger.debug("Dimension probe skipped: %s", exc)
+
+            self._dimension_verified = True
+
         return m
 
     # ── Public API ────────────────────────────────────────────────────────────
 
     def embed_chunks(
         self,
-        chunks       : list[TextChunk],
-        doc_id       : str  = "",
-        batch_size   : int  = 0,   # 0 = auto
+        chunks: list[TextChunk],
+        doc_id: str = "",
+        batch_size: int = 0,  # 0 = auto
         show_progress: bool = False,
     ) -> np.ndarray:
         slog = ServiceLogger("embedding_service", doc_id=doc_id)
@@ -102,44 +214,62 @@ class EmbeddingService:
             slog.warning("embed_chunks called with empty list")
             return np.empty((0, self._dimension), dtype=np.float32)
 
-        # Auto batch size: smaller for tiny chunk sets to avoid overhead
         if batch_size == 0:
             batch_size = 32 if len(chunks) < 50 else 64
 
         slog.info("Embedding %d chunks (batch=%d) …", len(chunks), batch_size)
         texts = [c.content for c in chunks]
-        vecs  = self.model.encode(
+        vecs = self.model.encode(
             texts,
-            batch_size           = batch_size,
-            show_progress_bar    = show_progress,
-            convert_to_numpy     = True,
-            normalize_embeddings = True,
-        ).astype(np.float32)
+            batch_size=batch_size,
+            show_progress_bar=show_progress,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+        )
+        vecs = np.asarray(vecs, dtype=np.float32)
+
+        if vecs.ndim == 1:
+            vecs = vecs.reshape(1, -1)
+
         slog.info("Embeddings done ✓  shape=%s", str(vecs.shape))
         return vecs
 
     def embed_query(self, query: str) -> np.ndarray:
         if not query or not query.strip():
             raise ValueError("Query must not be empty.")
-        return self.model.encode(
+
+        vec = self.model.encode(
             [query.strip()],
-            convert_to_numpy     = True,
-            normalize_embeddings = True,
-        ).astype(np.float32)
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+        )
+        vec = np.asarray(vec, dtype=np.float32)
+
+        if vec.ndim == 1:
+            return vec.reshape(1, -1)
+
+        return vec
 
     def embed_texts(
         self,
-        texts      : list[str],
-        batch_size : int = 64,
+        texts: list[str],
+        batch_size: int = 64,
     ) -> np.ndarray:
         if not texts:
             return np.empty((0, self._dimension), dtype=np.float32)
-        return self.model.encode(
+
+        vecs = self.model.encode(
             texts,
-            batch_size           = batch_size,
-            convert_to_numpy     = True,
-            normalize_embeddings = True,
-        ).astype(np.float32)
+            batch_size=batch_size,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+        )
+        vecs = np.asarray(vecs, dtype=np.float32)
+
+        if vecs.ndim == 1:
+            vecs = vecs.reshape(1, -1)
+
+        return vecs
 
     # ── Utilities ─────────────────────────────────────────────────────────────
 
