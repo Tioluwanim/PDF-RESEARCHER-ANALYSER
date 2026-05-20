@@ -314,15 +314,35 @@ class DriveService:
             }
 
         try:
-            flow = Flow.from_client_config(
-                client_config,
-                scopes=[GOOGLE_DRIVE_READONLY_SCOPE],
-                redirect_uri=redirect_uri,
+            # IMPORTANT: do NOT pass code_challenge_method or use PKCE here.
+            # google_auth_oauthlib.Flow generates a code_verifier internally
+            # but we cannot persist the Flow object across Streamlit reruns,
+            # so the verifier is lost before exchange — causing
+            # "invalid_grant: Missing code verifier".
+            # Solution: build the auth URL manually via requests_oauthlib
+            # without PKCE so no verifier is needed at exchange time.
+            from requests_oauthlib import OAuth2Session
+
+            client_info = (
+                client_config.get("web")
+                or client_config.get("installed")
+                or client_config
             )
-            authorization_url, state = flow.authorization_url(
+            client_id     = client_info["client_id"]
+            auth_endpoint = client_info.get(
+                "auth_uri", "https://accounts.google.com/o/oauth2/auth"
+            )
+
+            oauth = OAuth2Session(
+                client_id=client_id,
+                redirect_uri=redirect_uri,
+                scope=[GOOGLE_DRIVE_READONLY_SCOPE],
+            )
+            authorization_url, state = oauth.authorization_url(
+                auth_endpoint,
                 access_type="offline",
-                include_granted_scopes="true",
                 prompt="consent",
+                include_granted_scopes="true",
             )
             return {
                 "authorization_url": authorization_url,
@@ -332,48 +352,78 @@ class DriveService:
             logger.error("Failed to build OAuth authorization URL: %s", e)
             return {"error": str(e)}
 
-    def exchange_authorization_code(self, authorization_code: str, redirect_uri: str | None = None) -> dict:
+    def exchange_authorization_code(
+        self,
+        authorization_code: str,
+        redirect_uri: str | None = None,
+    ) -> dict:
         """
         Exchange an OAuth authorization code for a token and persist it.
 
-        redirect_uri MUST exactly match what was used to generate the auth URL.
-        If not provided, it is resolved the same way as get_authorization_url().
+        Uses requests_oauthlib directly (no PKCE) to avoid the
+        "Missing code verifier" error that occurs when google_auth_oauthlib
+        generates a code_verifier in get_authorization_url but the Flow
+        object is not preserved across Streamlit reruns.
         """
         client_config = self._load_oauth_client_config()
-        redirect_uri = redirect_uri or self._get_oauth_redirect_uri()
+        redirect_uri  = redirect_uri or self._get_oauth_redirect_uri()
 
         if not client_config:
             return {"error": "OAuth client JSON missing."}
-
         if not redirect_uri:
             return {"error": "GOOGLE_OAUTH_REDIRECT_URI missing."}
 
         try:
-            from google_auth_oauthlib.flow import Flow
-        except ImportError:
-            return {"error": "google-auth-oauthlib is not installed."}
+            import json as _json
+            import requests as _requests
+            from requests_oauthlib import OAuth2Session
+            from google.oauth2.credentials import Credentials
 
-        try:
-            flow = Flow.from_client_config(
-                client_config,
-                scopes=[GOOGLE_DRIVE_READONLY_SCOPE],
-                redirect_uri=redirect_uri,
+            client_info = (
+                client_config.get("web")
+                or client_config.get("installed")
+                or client_config
             )
-            flow.fetch_token(code=authorization_code)
-            creds = flow.credentials
+            client_id     = client_info["client_id"]
+            client_secret = client_info["client_secret"]
+            token_endpoint = client_info.get(
+                "token_uri", "https://oauth2.googleapis.com/token"
+            )
+
+            oauth = OAuth2Session(
+                client_id=client_id,
+                redirect_uri=redirect_uri,
+                scope=[GOOGLE_DRIVE_READONLY_SCOPE],
+            )
+
+            # Fetch token without PKCE — no code_verifier needed
+            token = oauth.fetch_token(
+                token_endpoint,
+                code=authorization_code,
+                client_secret=client_secret,
+                include_client_id=True,
+            )
+
+            # Build a google-auth Credentials object and persist it
+            creds = Credentials(
+                token=token.get("access_token"),
+                refresh_token=token.get("refresh_token"),
+                token_uri=token_endpoint,
+                client_id=client_id,
+                client_secret=client_secret,
+                scopes=[GOOGLE_DRIVE_READONLY_SCOPE],
+            )
 
             token_path = self._get_oauth_token_path()
             token_path.parent.mkdir(parents=True, exist_ok=True)
             token_path.write_text(creds.to_json(), encoding="utf-8")
 
-            # Reset cached client so the new token is used on next call.
-            self._service = None
+            # Reset cached client so the new token is picked up immediately
+            self._service      = None
             self._service_mode = None
 
-            return {
-                "success": True,
-                "token_path": str(token_path),
-            }
+            return {"success": True, "token_path": str(token_path)}
+
         except Exception as e:
             logger.error("OAuth token exchange failed: %s", e)
             return {"error": str(e)}
