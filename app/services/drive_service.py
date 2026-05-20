@@ -111,7 +111,48 @@ class DriveService:
         return path if path.is_absolute() else BASE_DIR / path
 
     def _get_oauth_redirect_uri(self) -> str:
-        return os.getenv("GOOGLE_OAUTH_REDIRECT_URI", GOOGLE_OAUTH_REDIRECT_URI).strip()
+        """
+        Resolve the redirect URI at call time — never at import time.
+
+        Priority:
+          1. GOOGLE_OAUTH_REDIRECT_URI env var (explicit override)
+          2. Streamlit runtime URL (auto-detected from browser request headers)
+          3. localhost:8501 fallback for local dev
+
+        Reading from Streamlit at runtime is essential because on Streamlit
+        Cloud the app URL is only known once a user visits the app —
+        it cannot be determined at module load / startup time.
+        """
+        explicit = os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "").strip()
+        if explicit:
+            return explicit
+
+        # Auto-detect from Streamlit runtime context (works on Cloud and locally)
+        try:
+            from streamlit.web.server.websocket_headers import _get_websocket_headers
+            headers = _get_websocket_headers()
+            if headers:
+                host = headers.get("Host") or headers.get("host") or ""
+                if host:
+                    scheme = "https" if "streamlit.app" in host or "streamlit.io" in host else "http"
+                    return f"{scheme}://{host}/"
+        except Exception:
+            pass
+
+        # Try Streamlit query params to infer current URL
+        try:
+            import streamlit as st
+            # st.context is available in Streamlit >= 1.33
+            ctx_url = getattr(getattr(st, "context", None), "url", None)
+            if ctx_url:
+                from urllib.parse import urlparse as _up
+                p = _up(ctx_url)
+                return f"{p.scheme}://{p.netloc}/"
+        except Exception:
+            pass
+
+        # Fallback: localhost for dev
+        return "http://localhost:8501/"
 
     def _get_service_account_path(self) -> Path:
         raw = os.getenv("GOOGLE_CREDENTIALS_PATH", GOOGLE_CREDENTIALS_PATH).strip()
@@ -291,12 +332,15 @@ class DriveService:
             logger.error("Failed to build OAuth authorization URL: %s", e)
             return {"error": str(e)}
 
-    def exchange_authorization_code(self, authorization_code: str) -> dict:
+    def exchange_authorization_code(self, authorization_code: str, redirect_uri: str | None = None) -> dict:
         """
         Exchange an OAuth authorization code for a token and persist it.
+
+        redirect_uri MUST exactly match what was used to generate the auth URL.
+        If not provided, it is resolved the same way as get_authorization_url().
         """
         client_config = self._load_oauth_client_config()
-        redirect_uri = self._get_oauth_redirect_uri()
+        redirect_uri = redirect_uri or self._get_oauth_redirect_uri()
 
         if not client_config:
             return {"error": "OAuth client JSON missing."}

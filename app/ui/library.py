@@ -185,13 +185,21 @@ def _render_sync() -> None:
     try:
         params = st.query_params
         oauth_code = params.get("code", "")
-        oauth_state = params.get("state", "")
-        if oauth_code and auth_state.status in ("oauth_login_required", "missing_folder", "ready"):
+        if oauth_code:
+            # Use the exact redirect URI stored when the auth URL was built.
+            # Google requires this to match byte-for-byte.
+            stored_redirect = st.session_state.get(
+                "_oauth_redirect_uri",
+                drive_service._get_oauth_redirect_uri(),
+            )
             with st.spinner("Completing Google authentication…"):
-                result = drive_service.exchange_authorization_code(str(oauth_code))
+                result = drive_service.exchange_authorization_code(
+                    str(oauth_code),
+                    redirect_uri=stored_redirect,
+                )
             if result.get("success"):
-                # Clear the code from URL
                 st.query_params.clear()
+                st.session_state.pop("_oauth_redirect_uri", None)
                 st.success("✓ Google account connected. You can now sync Drive.")
                 st.rerun()
             else:
@@ -313,17 +321,24 @@ token_uri = "https://oauth2.googleapis.com/token"
         auth_info = drive_service.get_authorization_url()
         auth_url  = auth_info.get("authorization_url")
 
+        # Show the exact redirect URI being used so the user can add it to GCP
+        redirect_uri = drive_service._get_oauth_redirect_uri()
+        st.info(
+            f"**Before clicking Sign in**, make sure this exact URL is in your "
+            f"Google Cloud Console → Credentials → OAuth Client → "
+            f"**Authorised redirect URIs**:\n\n`{redirect_uri}`",
+            icon="⚠️",
+        )
+
         if auth_url:
-            st.markdown(
-                "Click the button below. After approving, Google will redirect you back "
-                "to this page and the app will complete login automatically."
-            )
+            # Store the redirect URI so exchange can use the exact same value
+            st.session_state["_oauth_redirect_uri"] = redirect_uri
             st.link_button("🔐 Sign in with Google", auth_url, use_container_width=True)
 
             st.markdown("---")
             st.caption(
-                "If the redirect does not work automatically, copy the `code=` value "
-                "from the browser URL and paste it below."
+                "After approving, Google redirects back to this page and login "
+                "completes automatically. If it doesn't, paste the `code=` value below."
             )
             manual_code = st.text_input(
                 "Authorization code (manual fallback)",
