@@ -12,6 +12,7 @@ sentence-transformers>=3.0.0
 torch>=2.2.0
 transformers>=4.48.0
 huggingface-hub>=0.25.0
+safetensors>=0.4.0
 faiss-cpu>=1.8.0
 numpy>=1.26.0,<2.0.0
 google-api-core>=2.0.0,<3.0.0
