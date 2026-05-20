@@ -69,7 +69,12 @@ class Repository:
         checksum: str | None = None,
         modified_time: datetime | None = None,
         source: str = "upload",
+        status: DocumentStatus | str = DocumentStatus.UPLOADED,
     ) -> Document:
+        if isinstance(status, DocumentStatus):
+            status_value = status.value
+        else:
+            status_value = status
         with self.session() as session:
             doc = Document(
                 doc_id=doc_id,
@@ -81,7 +86,7 @@ class Repository:
                 drive_file_id=drive_file_id,
                 checksum=checksum or "",
                 modified_time=modified_time,
-                status=DocumentStatus.UPLOADED.value,
+                status=status_value,
             )
             session.add(doc)
             session.flush()
@@ -511,6 +516,7 @@ class Repository:
         new_files: int,
         skipped_files: int,
         failed_files: int,
+        updated_files: int = 0,
         error_message: str | None = None,
     ) -> None:
         with self.session() as session:
