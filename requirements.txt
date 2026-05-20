@@ -4,25 +4,35 @@ pydantic>=2.6.0,<3.0.0
 SQLAlchemy>=2.0.0,<3.0.0
 alembic>=1.13.0,<2.0.0
 psycopg2-binary>=2.9.9,<3.0.0
+
 PyMuPDF>=1.23.0,<2.0.0
 pytesseract>=0.3.10
 pdf2image>=1.17.0
 Pillow>=10.0.0,<12.0.0
-sentence-transformers>=3.0.0
-torch>=2.2.0
-transformers>=4.48.0
-huggingface-hub>=0.25.0
-safetensors>=0.4.0
-faiss-cpu>=1.8.0
+
 numpy>=1.26.0,<2.0.0
+faiss-cpu>=1.8.0
+
+# Embeddings / NLP stack
+sentence-transformers>=3.0.0,<4.0.0
+transformers>=4.41.0,<5.0.0
+torch>=2.4.0
+huggingface-hub>=0.25.0,<1.0.0
+safetensors>=0.4.0
+
+# Google Drive / API
 google-api-core>=2.0.0,<3.0.0
-openai>=1.30.0
-requests>=2.31.0
-urllib3>=2.0.0
-certifi>=2024.2.2
-openpyxl>=3.1.0
-python-docx>=1.1.0
 google-api-python-client>=2.100.0
 google-auth>=2.20.0
 google-auth-httplib2>=0.1.0
-google-auth-oauthlib
+google-auth-oauthlib>=1.2.0
+
+# Export / files / HTTP
+openpyxl>=3.1.0
+python-docx>=1.1.0
+requests>=2.31.0
+urllib3>=2.0.0
+certifi>=2024.2.2
+
+# LLM client
+openai>=1.30.0
