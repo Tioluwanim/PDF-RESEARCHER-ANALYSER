@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Iterable
 
 import numpy as np
-from sqlalchemy import select, func
+from sqlalchemy import inspect, select, func, text
 from sqlalchemy.orm import selectinload
 
 from app.db.models import (
@@ -404,6 +404,19 @@ class Repository:
             )
             return processed
 
+    def _ensure_sync_run_schema(self) -> None:
+        inspector = inspect(engine)
+        columns = [column["name"] for column in inspector.get_columns("sync_runs")]
+        if "updated_files" in columns:
+            return
+
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "ALTER TABLE sync_runs ADD COLUMN updated_files INTEGER DEFAULT 0 NOT NULL"
+                )
+            )
+
     def delete_document(self, doc_id: str) -> bool:
         with self.session() as session:
             record = session.execute(select(Document).where(Document.doc_id == doc_id)).scalar_one_or_none()
@@ -528,6 +541,7 @@ class Repository:
         updated_files: int = 0,
         error_message: str | None = None,
     ) -> None:
+        self._ensure_sync_run_schema()
         with self.session() as session:
             record = session.execute(select(SyncRun).where(SyncRun.id == sync_run.id)).scalar_one_or_none()
             if not record:

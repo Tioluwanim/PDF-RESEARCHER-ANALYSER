@@ -17,21 +17,39 @@ def render_export_tab() -> None:
     )
 
     docs = analysis_service.list_documents()
-    ready_docs = [d for d in docs if d.get("status") == "ready"]
+    ready_docs = [
+        d for d in docs
+        if str(d.get("status", "")).lower() == "ready"
+    ]
 
-    if not ready_docs:
-        st.info("No processed documents found. Upload and process PDFs first.")
+    if not docs:
+        st.info("No documents found in the database. Upload and process PDFs first.")
         return
 
-    all_names = [d["filename"] for d in ready_docs]
+    if not ready_docs:
+        st.info(
+            f"{len(docs)} document(s) found, but none are ready for export. "
+            "Process documents first, then return to Export."
+        )
+        return
+
+    all_options = [
+        f'{d["filename"]} — {d["doc_id"][:8]}'
+        for d in ready_docs
+    ]
+    option_to_id = {
+        option: d["doc_id"]
+        for option, d in zip(all_options, ready_docs)
+    }
+
     selected = st.multiselect(
         "Select documents to export",
-        options=all_names,
-        default=all_names,
+        options=all_options,
+        default=all_options,
         key="export_select",
     )
 
-    selected_ids = [d["doc_id"] for d in ready_docs if d["filename"] in selected]
+    selected_ids = [option_to_id[name] for name in selected if name in option_to_id]
     if not selected_ids:
         st.warning("Select at least one document to export.", icon="⚠️")
         return
@@ -155,7 +173,8 @@ def render_export_tab() -> None:
         f'<span style="flex:2;">{html.escape(d["filename"][:45])}</span>'
         f'<span style="font-family:var(--f-mono);font-size:0.7rem;color:var(--success);">● ready</span>'
         '</div>'
-        for d in ready_docs if d["filename"] in selected
+        for d in ready_docs
+        if option_to_id.get(f'{d["filename"]} — {d["doc_id"][:8]}') in selected_ids
     )
     if rows_html:
         st.markdown(
