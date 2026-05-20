@@ -22,10 +22,7 @@ def render_export_tab() -> None:
     )
 
     docs = analysis_service.list_documents()
-    ready_docs = [
-        d for d in docs
-        if str(d.get("status", "")).lower() == "ready"
-    ]
+    ready_docs = [d for d in docs if str(d.get("status", "")).lower() == "ready"]
 
     if not docs:
         st.info("No documents found in the database. Upload and process PDFs first.")
@@ -45,16 +42,6 @@ def render_export_tab() -> None:
         key="export_template",
     )
     template = "thesis" if template_choice == "PhD Theses" else "journal"
-
-    selection_signature = _make_signature(
-        ready_docs=[d["doc_id"] for d in ready_docs],
-        selected_ids=st.session_state.get("export_selected_ids", []),
-        template=template,
-    )
-
-    if st.session_state.get("_export_signature") != selection_signature:
-        st.session_state.export_data = {}
-        st.session_state["_export_signature"] = selection_signature
 
     st.caption(
         "📋 Journal Articles — authors, DOI, ISSN, journal, volume, issue, keywords"
@@ -76,39 +63,64 @@ def render_export_tab() -> None:
     )
 
     selected_ids = [option_map[label] for label in selected_labels if label in option_map]
-    st.session_state.export_selected_ids = selected_ids
-
     if not selected_ids:
         st.warning("Select at least one document to export.", icon="⚠️")
         return
 
+    st.session_state.export_selected_ids = selected_ids
     st.caption(f"{len(selected_ids)} document(s) selected")
 
     fname_suffix = "_theses" if template == "thesis" else "_journal"
     export_cache = st.session_state.setdefault("export_data", {})
     export_key_prefix = f"{template}_{'_'.join(selected_ids)}"
 
+    # clear stale export files when selection/template changes
+    current_sig = _make_signature(
+        ready_docs=[d["doc_id"] for d in ready_docs],
+        selected_ids=selected_ids,
+        template=template,
+    )
+    if st.session_state.get("_export_signature") != current_sig:
+        export_cache.clear()
+        st.session_state["_export_signature"] = current_sig
+
     st.markdown("<hr style='margin:1rem 0;'>", unsafe_allow_html=True)
 
-    col1, col2 = st.columns([1, 1])
-    with col1:
+    col_all, col_clear = st.columns([1, 1])
+    with col_all:
         if st.button(
             "Generate all exports",
             type="primary",
             use_container_width=True,
             key="gen_all_exports",
         ):
-            _generate_all_exports(
-                selected_ids=selected_ids,
-                template=template,
-                fname_suffix=fname_suffix,
-                export_cache=export_cache,
-                export_key_prefix=export_key_prefix,
-            )
-            st.success("Exports are ready below.")
-            st.rerun()
+            with st.spinner("Building all exports..."):
+                try:
+                    export_cache[f"{export_key_prefix}_xlsx"] = export_service.export_xlsx(
+                        selected_ids,
+                        filename=f"metadata_export{fname_suffix}.xlsx",
+                        template=template,
+                    )
+                    export_cache[f"{export_key_prefix}_docx"] = export_service.export_docx(
+                        selected_ids,
+                        filename=f"research_report{fname_suffix}.docx",
+                        template=template,
+                    )
+                    export_cache[f"{export_key_prefix}_csv"] = export_service.export_csv(
+                        selected_ids,
+                        filename=f"metadata_export{fname_suffix}.csv",
+                        template=template,
+                    )
+                    export_cache[f"{export_key_prefix}_json"] = export_service.export_json(
+                        selected_ids,
+                        filename=f"metadata_export{fname_suffix}.json",
+                        template=template,
+                    )
+                    st.success("All exports generated. Download them below.")
+                except Exception as exc:
+                    st.error(f"Export generation failed: {exc}")
 
-    with col2:
+    with col_clear:
         if st.button(
             "Clear generated files",
             use_container_width=True,
@@ -125,7 +137,7 @@ def render_export_tab() -> None:
         col=cards[0],
         title="📊 Excel (XLSX)",
         description="Structured spreadsheet for analysis.",
-        button_label="Generate XLSX",
+        generate_label="Generate XLSX",
         download_label="⬇ Download XLSX",
         cache_key=f"{export_key_prefix}_xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -142,7 +154,7 @@ def render_export_tab() -> None:
         col=cards[1],
         title="📝 Word (DOCX)",
         description="Formatted report per document.",
-        button_label="Generate DOCX",
+        generate_label="Generate DOCX",
         download_label="⬇ Download DOCX",
         cache_key=f"{export_key_prefix}_docx",
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -159,7 +171,7 @@ def render_export_tab() -> None:
         col=cards[2],
         title="📋 CSV",
         description="Plain text, importable anywhere.",
-        button_label="Generate CSV",
+        generate_label="Generate CSV",
         download_label="⬇ Download CSV",
         cache_key=f"{export_key_prefix}_csv",
         mime="text/csv",
@@ -176,7 +188,7 @@ def render_export_tab() -> None:
         col=cards[3],
         title="🔗 JSON",
         description="For API and integration use.",
-        button_label="Generate JSON",
+        generate_label="Generate JSON",
         download_label="⬇ Download JSON",
         cache_key=f"{export_key_prefix}_json",
         mime="application/json",
@@ -219,7 +231,7 @@ def _render_export_card(
     col,
     title: str,
     description: str,
-    button_label: str,
+    generate_label: str,
     download_label: str,
     cache_key: str,
     mime: str,
@@ -232,7 +244,7 @@ def _render_export_card(
         st.caption(description)
 
         if st.button(
-            button_label,
+            generate_label,
             type="primary",
             use_container_width=True,
             key=f"btn_{cache_key}",
@@ -240,6 +252,7 @@ def _render_export_card(
             with st.spinner("Building export…"):
                 try:
                     export_cache[cache_key] = generate_fn()
+                    st.success("Ready to download.")
                 except Exception as exc:
                     st.error(f"{title} failed: {exc}")
 
@@ -253,36 +266,16 @@ def _render_export_card(
                 use_container_width=True,
                 key=f"dl_{cache_key}",
             )
-
-
-def _generate_all_exports(
-    *,
-    selected_ids: list[str],
-    template: str,
-    fname_suffix: str,
-    export_cache: dict,
-    export_key_prefix: str,
-) -> None:
-    export_cache[f"{export_key_prefix}_xlsx"] = export_service.export_xlsx(
-        selected_ids,
-        filename=f"metadata_export{fname_suffix}.xlsx",
-        template=template,
-    )
-    export_cache[f"{export_key_prefix}_docx"] = export_service.export_docx(
-        selected_ids,
-        filename=f"research_report{fname_suffix}.docx",
-        template=template,
-    )
-    export_cache[f"{export_key_prefix}_csv"] = export_service.export_csv(
-        selected_ids,
-        filename=f"metadata_export{fname_suffix}.csv",
-        template=template,
-    )
-    export_cache[f"{export_key_prefix}_json"] = export_service.export_json(
-        selected_ids,
-        filename=f"metadata_export{fname_suffix}.json",
-        template=template,
-    )
+        else:
+            st.download_button(
+                download_label,
+                data=b"",
+                file_name=filename,
+                mime=mime,
+                use_container_width=True,
+                key=f"dl_disabled_{cache_key}",
+                disabled=True,
+            )
 
 
 def _make_signature(
