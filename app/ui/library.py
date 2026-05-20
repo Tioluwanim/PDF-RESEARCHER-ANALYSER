@@ -182,39 +182,41 @@ def _render_sync() -> None:
     auth_state = drive_service.get_auth_state()
 
     # ── Auto-handle OAuth ?code= redirect ────────────────────────────────────
-    # Google auth codes are SINGLE-USE. Streamlit reruns the script on every
-    # interaction, so we must guard the exchange with a session state flag to
-    # ensure it fires exactly once — otherwise the second rerun sends the same
-    # code again and gets invalid_grant: Bad Request.
+    # Google auth codes are SINGLE-USE. We must:
+    #   1. Clear the code from the URL immediately (before any rerun)
+    #   2. Guard with session state so a crash+restart cannot re-fire exchange
     try:
         params = st.query_params
         oauth_code = params.get("code", "")
-        already_exchanged = st.session_state.get("_oauth_code_exchanged") == oauth_code
 
-        if oauth_code and not already_exchanged:
-            # Mark immediately — before the network call — so a rerun triggered
-            # during the spinner cannot fire a second exchange.
-            st.session_state["_oauth_code_exchanged"] = oauth_code
+        if oauth_code:
+            # IMMEDIATELY clear the code from the URL so that if anything
+            # crashes below (DB error, network timeout etc.) the next page
+            # load does not see ?code= again and attempt a second exchange.
+            st.query_params.clear()
 
-            stored_redirect = st.session_state.get(
-                "_oauth_redirect_uri",
-                drive_service._get_oauth_redirect_uri(),
-            )
-            with st.spinner("Completing Google authentication…"):
-                result = drive_service.exchange_authorization_code(
-                    str(oauth_code),
-                    redirect_uri=stored_redirect,
+            already_exchanged = st.session_state.get("_oauth_code_exchanged") == oauth_code
+            if not already_exchanged:
+                # Mark before the network call — prevents double-fire on rerun
+                st.session_state["_oauth_code_exchanged"] = oauth_code
+
+                stored_redirect = st.session_state.get(
+                    "_oauth_redirect_uri",
+                    drive_service._get_oauth_redirect_uri(),
                 )
-            if result.get("success"):
-                st.query_params.clear()
-                st.session_state.pop("_oauth_redirect_uri", None)
-                st.session_state.pop("_oauth_code_exchanged", None)
-                st.success("✓ Google account connected. You can now sync Drive.")
-                st.rerun()
-            else:
-                # Clear the guard so the user can retry with a fresh auth URL
-                st.session_state.pop("_oauth_code_exchanged", None)
-                st.error(f"OAuth failed: {result.get('error', 'Unknown error')}")
+                with st.spinner("Completing Google authentication…"):
+                    result = drive_service.exchange_authorization_code(
+                        str(oauth_code),
+                        redirect_uri=stored_redirect,
+                    )
+                if result.get("success"):
+                    st.session_state.pop("_oauth_redirect_uri", None)
+                    st.session_state.pop("_oauth_code_exchanged", None)
+                    st.success("✓ Google account connected. You can now sync Drive.")
+                    st.rerun()
+                else:
+                    st.session_state.pop("_oauth_code_exchanged", None)
+                    st.error(f"OAuth failed: {result.get('error', 'Unknown error')}")
     except Exception:
         pass  # query_params not available in all contexts
 

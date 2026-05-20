@@ -21,6 +21,7 @@ from app.models.schemas import DocumentStatus, SectionType, MessageRole
 
 class Document(Base):
     __tablename__ = "documents"
+    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True)
     doc_id = Column(String(36), unique=True, index=True, nullable=False)
@@ -65,6 +66,7 @@ class Document(Base):
 
 class DocumentVersion(Base):
     __tablename__ = "document_versions"
+    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True)
     document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
@@ -82,6 +84,7 @@ class DocumentVersion(Base):
 
 class IngestionJob(Base):
     __tablename__ = "ingestion_jobs"
+    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True)
     document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=True)
@@ -100,6 +103,7 @@ class IngestionJob(Base):
 
 class SyncRun(Base):
     __tablename__ = "sync_runs"
+    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True)
     folder_id = Column(String(128), nullable=True)
@@ -115,6 +119,7 @@ class SyncRun(Base):
 
 class ProcessingLog(Base):
     __tablename__ = "processing_logs"
+    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True)
     document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=True)
@@ -128,6 +133,7 @@ class ProcessingLog(Base):
 
 class DocumentSection(Base):
     __tablename__ = "document_sections"
+    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True)
     document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
@@ -146,6 +152,7 @@ class DocumentSection(Base):
 
 class DocumentChunk(Base):
     __tablename__ = "document_chunks"
+    __table_args__ = {"extend_existing": True}
 
     id = Column(String(64), primary_key=True)
     document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
@@ -164,6 +171,7 @@ class DocumentChunk(Base):
 
 class ExportJob(Base):
     __tablename__ = "export_jobs"
+    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True)
     document_id = Column(Integer, ForeignKey("documents.id", ondelete="SET NULL"), nullable=True)
@@ -180,6 +188,7 @@ class ExportJob(Base):
 
 class ChatSession(Base):
     __tablename__ = "chat_sessions"
+    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True)
     document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=True)
@@ -193,6 +202,7 @@ class ChatSession(Base):
 
 class ChatMessage(Base):
     __tablename__ = "chat_messages"
+    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True)
     session_id = Column(Integer, ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False)
