@@ -61,7 +61,6 @@ def _env_int(name: str, default: int) -> int:
 
     try:
         return int(value)
-
     except (TypeError, ValueError):
         return default
 
@@ -74,7 +73,6 @@ def _env_float(name: str, default: float) -> float:
 
     try:
         return float(value)
-
     except (TypeError, ValueError):
         return default
 
@@ -87,6 +85,28 @@ def _resolved_path(path_value: str) -> Path:
 
     return BASE_DIR / path
 
+
+def _normalize_database_url(raw_url: str | None) -> str:
+    """
+    Clean up DATABASE_URL so SQLAlchemy can parse it reliably.
+    """
+    if not raw_url:
+        return ""
+
+    url = raw_url.strip().strip('"').strip("'")
+
+    if not url:
+        return ""
+
+    # Support old postgres scheme
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+
+    # Prefer explicit driver name for SQLAlchemy
+    if url.startswith("postgresql://"):
+        url = url.replace("postgresql://", "postgresql+psycopg://", 1)
+
+    return url
 
 # =============================================================================
 # STREAMLIT SECRETS SUPPORT
@@ -143,6 +163,7 @@ def _load_streamlit_secrets_into_env() -> None:
             "GOOGLE_OAUTH_REDIRECT_URI",
             "GOOGLE_OAUTH_CLIENT_PATH",
             "GOOGLE_OAUTH_TOKEN_PATH",
+            "DATABASE_URL",
         }
 
         def _load_known_secret_keys(item: Any) -> None:
@@ -274,7 +295,6 @@ def _write_json_file(path: Path, data: Mapping[str, Any]) -> bool:
     except Exception:
         return False
 
-
 # =============================================================================
 # LOAD ENVIRONMENT
 # =============================================================================
@@ -324,10 +344,7 @@ MAX_CHAT_HISTORY = _env_int("MAX_CHAT_HISTORY", 20)
 # DATABASE
 # =============================================================================
 
-DATABASE_URL = _env_str(
-    "DATABASE_URL"
-)
-
+DATABASE_URL = _normalize_database_url(_env_str("DATABASE_URL"))
 SQLALCHEMY_ECHO = _env_bool("SQLALCHEMY_ECHO", False)
 
 # =============================================================================
@@ -520,7 +537,6 @@ def is_drive_sync_configured() -> bool:
         for path in (oauth_client_path, oauth_token_path, sa_path)
     )
 
-
 # =============================================================================
 # OPENROUTER
 # =============================================================================
@@ -678,6 +694,9 @@ def validate_config() -> list[str]:
 
     issues: list[str] = []
 
+    if not DATABASE_URL:
+        issues.append("DATABASE_URL is missing or empty.")
+
     if not OPENROUTER_API_KEY and not HUGGINGFACE_API_KEY:
         issues.append(
             "No LLM provider configured. Set OPENROUTER_API_KEY or HUGGINGFACE_API_KEY."
@@ -722,7 +741,6 @@ def get_config_summary() -> dict[str, str | int | bool]:
         "max_file_size_mb": MAX_FILE_SIZE_MB,
         "drive_sync_configured": is_drive_sync_configured(),
     }
-
 
 # =============================================================================
 # EXPORTS
