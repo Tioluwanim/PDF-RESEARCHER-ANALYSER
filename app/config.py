@@ -325,8 +325,7 @@ MAX_CHAT_HISTORY = _env_int("MAX_CHAT_HISTORY", 20)
 # =============================================================================
 
 DATABASE_URL = _env_str(
-    "DATABASE_URL",
-    f"sqlite:///{BASE_DIR / 'data' / 'pdf_analyzer.db'}",
+    "DATABASE_URL"
 )
 
 SQLALCHEMY_ECHO = _env_bool("SQLALCHEMY_ECHO", False)
