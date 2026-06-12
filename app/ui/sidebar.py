@@ -19,7 +19,6 @@ import os
 import streamlit as st
 
 from app.services.analysis_service import analysis_service
-from app.services.drive_service import drive_service
 from app.ui.shared import delete_all_docs, delete_doc_cache, handle_upload
 from app.utils.logger import get_logger
 
@@ -117,76 +116,8 @@ def render_sidebar() -> None:
             )
 
     # ── Google Drive ──────────────────────────────────────────────────────────
-    st.sidebar.markdown("<hr>", unsafe_allow_html=True)
-    st.sidebar.markdown(
-        '<span class="sb-label">Google Drive Sync</span>',
-        unsafe_allow_html=True,
-    )
-
-    if drive_service.is_configured:
-        st.sidebar.markdown(
-            f'<div style="font-family:var(--f-mono);font-size:0.65rem;'
-            f'color:var(--sb-muted);margin-bottom:0.5rem;word-break:break-all;">'
-            f'📁 {drive_service.folder_id}</div>',
-            unsafe_allow_html=True,
-        )
-        if st.sidebar.button("⟳ Sync Google Drive", type="primary", key="sidebar_drive_sync", width="stretch"):
-            status = st.sidebar.empty()
-            with st.sidebar.status("Syncing Drive folder…", expanded=True) as sync_status:
-                try:
-                    result = analysis_service.sync_drive(
-                        on_file_found=lambda name, idx, total: status.info(
-                            f"{idx}/{total}: {name}"
-                        ),
-                    )
-                    jobs = analysis_service.process_pending_ingestion_jobs(
-                        limit=50,
-                        on_progress=lambda step, pct: status.info(f"[Ingestion {pct}%] {step}"),
-                    )
-                    sync_status.update(label="Sync complete ✓", state="complete")
-                    st.sidebar.success(
-                        f"{result.get('new', 0)} changed · "
-                        f"{result.get('skipped', 0)} skipped · "
-                        f"{jobs.get('succeeded', 0)} processed"
-                    )
-                    st.rerun()
-                except Exception as exc:
-                    sync_status.update(label="Sync failed", state="error")
-                    st.sidebar.error(f"Sync error: {exc}")
-    else:
-        folder_id_set = bool(os.getenv("GOOGLE_DRIVE_FOLDER_ID", "").strip())
-
-        if not folder_id_set:
-            # Let the user paste the Drive URL or bare folder ID right here
-            st.sidebar.caption(
-                "Paste a Google Drive folder URL or ID to enable sync."
-            )
-            folder_input = st.sidebar.text_input(
-                "Drive folder URL or ID",
-                placeholder="https://drive.google.com/drive/folders/… or 1Bxi…",
-                label_visibility="collapsed",
-                key="sidebar_drive_folder_input",
-            )
-            if st.sidebar.button("Save folder ID", key="sidebar_drive_folder_save"):
-                raw = (folder_input or "").strip()
-                if raw:
-                    drive_service.set_folder_id(raw)
-                    st.sidebar.success(
-                        "Folder ID saved. Add credentials.json to the project "
-                        "root (or set [gcp_service_account] in Streamlit secrets) "
-                        "to complete Drive setup."
-                    )
-                    st.rerun()
-                else:
-                    st.sidebar.warning("Please enter a folder URL or ID.")
-        else:
-            # Folder ID is set but credentials JSON is missing
-            st.sidebar.warning(
-                "GOOGLE_DRIVE_FOLDER_ID is set but **credentials.json** is missing. "
-                "Upload your GCP service-account JSON to the project root, or add "
-                "it under `[gcp_service_account]` in Streamlit secrets.",
-                icon="🔑",
-            )
+    from app.ui.drive_tab import render_drive_sidebar
+    render_drive_sidebar()
 
     # ── Cache management ──────────────────────────────────────────────────────
     st.sidebar.markdown("<hr>", unsafe_allow_html=True)
