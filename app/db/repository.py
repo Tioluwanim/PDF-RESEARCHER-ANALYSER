@@ -654,6 +654,53 @@ class Repository:
             error_message=error_message,
         )
 
+    def list_ingestion_jobs(
+        self,
+        statuses: list[str] | None = None,
+        limit: int = 200,
+    ) -> list[IngestionJob]:
+        """Return ingestion jobs, optionally filtered by status list."""
+        with self.session() as session:
+            stmt = (
+                select(IngestionJob)
+                .options(selectinload(IngestionJob.document))
+                .order_by(IngestionJob.queued_at.desc())
+                .limit(limit)
+            )
+            if statuses:
+                stmt = stmt.where(IngestionJob.status.in_(statuses))
+            return session.execute(stmt).scalars().all()
+
+    def requeue_ingestion_job(self, ingestion_job_id: int) -> bool:
+        """Reset a failed/completed job back to queued so it can be retried."""
+        with self.session() as session:
+            job = session.execute(
+                select(IngestionJob).where(IngestionJob.id == ingestion_job_id)
+            ).scalar_one_or_none()
+            if not job:
+                return False
+            job.status = "queued"
+            job.started_at = None
+            job.completed_at = None
+            job.error_message = None
+            job.retry_count = (job.retry_count or 0) + 1
+            session.add(job)
+            return True
+
+    def requeue_all_failed_jobs(self) -> int:
+        """Requeue every failed ingestion job. Returns count requeued."""
+        with self.session() as session:
+            jobs = session.execute(
+                select(IngestionJob).where(IngestionJob.status == "failed")
+            ).scalars().all()
+            for job in jobs:
+                job.status = "queued"
+                job.started_at = None
+                job.completed_at = None
+                job.retry_count = (job.retry_count or 0) + 1
+                session.add(job)
+            return len(jobs)
+
     def get_document_chunk_embeddings(self, doc_id: str) -> list[tuple[str, np.ndarray]]:
         with self.session() as session:
             record = session.execute(select(Document).where(Document.doc_id == doc_id)).scalar_one_or_none()
