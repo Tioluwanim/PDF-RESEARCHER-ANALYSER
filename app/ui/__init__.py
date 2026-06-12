@@ -7,6 +7,7 @@ from app.ui.document import (
     render_search_tab,
     render_info_tab,
 )
+from app.ui.drive_tab import render_drive_tab, render_drive_sidebar
 from app.ui.export import render_export_tab
 from app.ui.library import render_library_search_tab
 from app.ui.sidebar import render_sidebar
@@ -22,4 +23,6 @@ __all__ = [
     "render_library_search_tab",
     "render_batch_tab",
     "render_export_tab",
+    "render_drive_tab",
+    "render_drive_sidebar",
 ]
