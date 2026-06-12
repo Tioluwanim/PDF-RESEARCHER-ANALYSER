@@ -34,6 +34,8 @@ from app.ui import (
     render_batch_tab,
     render_chat_tab,
     render_doc_header,
+    render_drive_tab,
+    render_drive_sidebar,
     render_empty_state,
     render_export_tab,
     render_info_tab,
@@ -115,7 +117,7 @@ def _render_app_header() -> None:
 def _render_main() -> None:
     _render_app_header()
 
-    modes = ["📄 Single PDF", "🔎 Library Search", "📚 Batch Upload", "📤 Export"]
+    modes = ["📄 Single PDF", "🔎 Library Search", "📚 Batch Upload", "☁️ Drive Sync", "📤 Export"]
     current_mode = st.session_state.get("app_mode", "📄 Single PDF")
 
     mode = st.radio(
@@ -139,6 +141,10 @@ def _render_main() -> None:
 
     if mode == "📚 Batch Upload":
         render_batch_tab()
+        return
+
+    if mode == "☁️ Drive Sync":
+        render_drive_tab()
         return
 
     if mode == "📤 Export":
