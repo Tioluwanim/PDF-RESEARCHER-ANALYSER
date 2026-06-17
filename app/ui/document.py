@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import html
 import streamlit as st
@@ -33,7 +33,7 @@ def render_doc_header(info: dict, chunks: dict) -> None:
         st.markdown(
             f'<div class="stat-card">'
             f'  <div class="stat-label">Pages</div>'
-            f'  <div class="stat-value">{info.get("metadata", {}).get("pages", 0)}</div>'
+            f'  <div class="stat-value">{info.get("metadata", {}).get("page_count", 0)}</div>'
             f'</div>',
             unsafe_allow_html=True,
         )
@@ -41,7 +41,7 @@ def render_doc_header(info: dict, chunks: dict) -> None:
         st.markdown(
             f'<div class="stat-card">'
             f'  <div class="stat-label">Words</div>'
-            f'  <div class="stat-value">{fmt_number(info.get("metadata", {}).get("words", 0))}</div>'
+            f'  <div class="stat-value">{fmt_number(info.get("metadata", {}).get("word_count", 0))}</div>'
             f'</div>',
             unsafe_allow_html=True,
         )
@@ -251,15 +251,17 @@ def render_info_tab(info: dict) -> None:
         lang_display = "🔍 OCR Processed" if lang == "ocr" else lang.upper()
         _meta_block("Language / Mode", lang_display)
     with c2:
-        _meta_block("Pages", str(meta.get("pages", 0)), large=True)
-        _meta_block("Words", fmt_number(meta.get("words", 0)), large=True)
+        _meta_block("Pages", str(meta.get("page_count", 0)), large=True)
+        _meta_block("Words", fmt_number(meta.get("word_count", 0)), large=True)
         _meta_block("DOI", meta.get("doi") or "—")
         _meta_block("ISSN", meta.get("issn") or "—")
         vol = meta.get("volume", "")
         issue = meta.get("issue", "")
         vol_issue = ((f"Vol {vol}" if vol else "") + (f", No {issue}" if issue else "")) or "—"
         _meta_block("Vol / Issue", vol_issue)
-        _meta_block("File Size", meta.get("file_size", "—"))
+        raw_size = meta.get("file_size_bytes", 0) or 0
+        size_display = f"{raw_size / 1024:.1f} KB" if raw_size else "—"
+        _meta_block("File Size", size_display)
 
     kws = meta.get("keywords", [])
     if kws:
