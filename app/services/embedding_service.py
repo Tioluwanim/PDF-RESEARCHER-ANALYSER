@@ -1,12 +1,18 @@
 """
 embedding_service.py - Local sentence-transformers embeddings.
 
-Key improvements:
-- Model cached in st.session_state when running under Streamlit,
-  preventing expensive reloads on every Streamlit rerun
-- Suppresses all HuggingFace/transformers noise before any import
-- Batch size auto-tuned based on chunk count
-- Graceful fallback encoder if Sentence Transformers cannot load
+Improvements over v1:
+  - Batch size scales more aggressively with chunk count (32/64/128/256)
+    so encoding 10k-30k chunks (a 50-100 PDF batch) doesn't bottleneck on
+    tiny batches with high per-call overhead.
+  - torch thread count explicitly set to os.cpu_count() when not already
+    configured, so CPU-bound encoding uses all available cores.
+  - Model cached in st.session_state when running under Streamlit,
+    preventing expensive reloads on every Streamlit rerun.
+  - Suppresses all HuggingFace/transformers noise before any import.
+  - Graceful fallback encoder if Sentence Transformers cannot load.
+  - Query embedding cache (LRU, size 256) — repeated searches/chat turns
+    on the same question don't re-run the model.
 """
 
 from __future__ import annotations
@@ -15,6 +21,7 @@ import hashlib
 import logging
 import os
 import re
+from functools import lru_cache
 from typing import Optional
 
 import numpy as np
@@ -27,6 +34,12 @@ logging.getLogger("transformers").setLevel(logging.ERROR)
 logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
 logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
 
+# Make sure CPU-bound encoding uses all available cores unless the
+# deployment environment has already pinned thread counts explicitly.
+if "OMP_NUM_THREADS" not in os.environ and "TORCH_NUM_THREADS" not in os.environ:
+    _cpu_count = os.cpu_count() or 4
+    os.environ.setdefault("OMP_NUM_THREADS", str(_cpu_count))
+
 from app.config import EMBEDDING_DIMENSION, EMBEDDING_MODEL
 from app.models.schemas import TextChunk
 from app.utils.logger import ServiceLogger, get_logger
@@ -35,6 +48,17 @@ logger = get_logger(__name__)
 
 _ST_CACHE_KEY = "_embedding_model_singleton"
 _module_model_cache: Optional[object] = None
+
+
+def _set_torch_threads() -> None:
+    """Set torch's intra-op thread count to all available CPUs, once."""
+    try:
+        import torch
+        cpu_count = os.cpu_count() or 4
+        if torch.get_num_threads() < cpu_count:
+            torch.set_num_threads(cpu_count)
+    except Exception:
+        pass
 
 
 class _FallbackEmbeddingModel:
@@ -113,7 +137,7 @@ def _load_sentence_transformer_model(model_name: str):
     actually needed.
     """
     from sentence_transformers import SentenceTransformer
-
+    _set_torch_threads()
     return SentenceTransformer(model_name)
 
 
@@ -148,6 +172,24 @@ def _get_or_load_model(model_name: str):
 
     _store_model(model)
     return model
+
+
+def _auto_batch_size(n_texts: int) -> int:
+    """
+    Scale batch size with input volume to amortise per-call overhead.
+
+    Small batches (<50 texts, e.g. a single short PDF) use 32 to keep
+    memory low. Large batches (a 50-100 PDF sync producing 10k-30k chunks)
+    use up to 256, which on CPU sentence-transformers models cuts total
+    encode wall-clock time substantially versus fixed small batches.
+    """
+    if n_texts < 50:
+        return 32
+    if n_texts < 500:
+        return 64
+    if n_texts < 5000:
+        return 128
+    return 256
 
 
 class EmbeddingService:
@@ -215,7 +257,7 @@ class EmbeddingService:
             return np.empty((0, self._dimension), dtype=np.float32)
 
         if batch_size == 0:
-            batch_size = 32 if len(chunks) < 50 else 64
+            batch_size = _auto_batch_size(len(chunks))
 
         slog.info("Embedding %d chunks (batch=%d) …", len(chunks), batch_size)
         texts = [c.content for c in chunks]
@@ -238,25 +280,34 @@ class EmbeddingService:
         if not query or not query.strip():
             raise ValueError("Query must not be empty.")
 
+        cached = self._embed_query_cached(query.strip())
+        return cached.copy()  # caller may mutate; never hand out the cached array
+
+    @lru_cache(maxsize=256)
+    def _embed_query_cached(self, query: str) -> np.ndarray:
         vec = self.model.encode(
-            [query.strip()],
+            [query],
             convert_to_numpy=True,
             normalize_embeddings=True,
         )
         vec = np.asarray(vec, dtype=np.float32)
-
         if vec.ndim == 1:
-            return vec.reshape(1, -1)
-
+            vec = vec.reshape(1, -1)
+        # Freeze so the cached array can't be mutated by a caller holding a
+        # reference; embed_query() always returns a fresh .copy() anyway.
+        vec.setflags(write=False)
         return vec
 
     def embed_texts(
         self,
         texts: list[str],
-        batch_size: int = 64,
+        batch_size: int = 0,  # 0 = auto
     ) -> np.ndarray:
         if not texts:
             return np.empty((0, self._dimension), dtype=np.float32)
+
+        if batch_size == 0:
+            batch_size = _auto_batch_size(len(texts))
 
         vecs = self.model.encode(
             texts,
