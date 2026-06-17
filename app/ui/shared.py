@@ -22,22 +22,44 @@ def fmt_number(value: int | float) -> str:
 
 
 def md_to_html(text: str) -> str:
-    """Convert lightweight markdown to safe HTML for chat bubbles."""
+    """
+    Convert lightweight markdown to safe HTML for chat bubbles.
+
+    Code blocks are extracted and stashed BEFORE the html.escape() pass,
+    then restored with their own escaping afterward. Doing it the other
+    way around (escape first, then regex for ``` fences) means the fence
+    markers and content are already entity-encoded by the time the fence
+    regex runs, so it silently fails to match and the code block leaks
+    through as raw escaped text instead of a <pre> block.
+    """
     import re
     if not text:
         return ""
+
+    # Step 1 — stash fenced code blocks with their RAW (unescaped) content
+    code_blocks: list[str] = []
+    _FENCE = re.compile(r"```(?:\w+\n)?(.*?)```", re.DOTALL)
+
+    def _stash(m: re.Match) -> str:
+        code_blocks.append(m.group(1).strip())
+        return f"\x00CODEBLOCK{len(code_blocks) - 1}\x00"
+
+    text = _FENCE.sub(_stash, text)
+
+    # Step 2 — escape everything else
     t = html.escape(text)
-    # Fenced code blocks
-    t = re.sub(
-        r"```(?:\w+\n)?(.*?)```",
-        lambda m: (
+
+    # Step 3 — restore code blocks, escaping their content independently
+    for i, raw_code in enumerate(code_blocks):
+        escaped_code = html.escape(raw_code)
+        t = t.replace(
+            f"\x00CODEBLOCK{i}\x00",
             '<pre style="background:var(--surface);padding:0.7rem 1rem;'
             'border-radius:6px;font-family:var(--f-mono);'
-            f'font-size:0.8rem;overflow-x:auto;margin:0.5rem 0;">'
-            f'{m.group(1).strip()}</pre>'
-        ),
-        t, flags=re.DOTALL,
-    )
+            f'font-size:0.8rem;overflow-x:auto;margin:0.5rem 0;">{escaped_code}</pre>',
+        )
+
+    # Step 4 — inline markdown on the already-escaped text
     t = re.sub(r"`([^`]+)`", r'<code>\1</code>', t)
     t = re.sub(r"\*\*(.+?)\*\*", r'<strong>\1</strong>', t)
     t = re.sub(r"\*(.+?)\*", r'<em>\1</em>', t)
@@ -150,7 +172,16 @@ def handle_chat(doc_id: str, question: str) -> None:
 
 def handle_upload(pdf_file) -> None:
     try:
-        doc, err = analysis_service.save_upload(file_bytes=pdf_file.read(), filename=pdf_file.name)
+        # getvalue() is preferred over read() for Streamlit's UploadedFile:
+        # it returns the buffer without advancing/consuming a stream
+        # position, so it stays safe even if something else touched the
+        # file object earlier in this run (e.g. a size-preview read).
+        try:
+            file_bytes = pdf_file.getvalue()
+        except Exception:
+            file_bytes = pdf_file.read()
+
+        doc, err = analysis_service.save_upload(file_bytes=file_bytes, filename=pdf_file.name)
         if err or not doc:
             message = getattr(err, "detail", str(err)) if err else "Upload failed"
             st.error(message)
