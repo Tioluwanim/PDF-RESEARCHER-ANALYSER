@@ -49,9 +49,17 @@ _SYSTEM = (
     "the provided context.\n\n"
     "Rules:\n"
     "- Answer ONLY from the context provided.\n"
-    "- If the context is insufficient, say so clearly.\n"
-    "- Never invent facts not present in the context.\n"
-    "- Be concise but thorough.\n"
+    "- If the context is insufficient, say so clearly rather than guessing.\n"
+    "- Never invent facts, numbers, or citations not present in the context.\n"
+    "- Be concise but thorough; prefer the shortest answer that fully "
+    "addresses the question.\n"
+    "- When the context includes a section tag (e.g. [METHODS], [RESULTS]), "
+    "you may reference which section supports a claim if it adds clarity.\n"
+    "- Use structure only when it aids understanding: short lists for "
+    "multi-part answers (e.g. several findings or steps), plain prose for "
+    "single-point answers. Avoid headers in chat responses.\n"
+    "- If multiple context excerpts disagree or seem inconsistent, note the "
+    "discrepancy rather than silently picking one.\n"
 )
 
 # ── OpenRouter free-router slug ───────────────────────────────────────────────
