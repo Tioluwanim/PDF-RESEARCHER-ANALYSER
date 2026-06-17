@@ -1,12 +1,22 @@
 """
 multi_drive_service.py — Multi-account, parallel Google Drive sync.
 
-Safer version:
-  - Uses a thread-local Drive client so each worker thread gets its own API stack.
-  - Protects token refresh with a lock.
-  - Clears the per-thread client after transient SSL/network failures.
-  - Keeps PDF conversion outside the download worker body to reduce native-library contention.
-  - Caps download concurrency with a hard safety limit by default.
+Improvements over the single-account drive_service.py:
+  - Manages N independent Drive accounts, each with its own OAuth token and
+    optional folder ID.  Accounts are stored in session_state + disk.
+  - Parallel download pool: downloads up to DRIVE_DOWNLOAD_WORKERS files
+    simultaneously using concurrent.futures.ThreadPoolExecutor, cutting sync
+    time on large folders by ~N× where N = worker count.
+  - Chunked streaming download with configurable chunk size (default 8 MB)
+    so memory stays flat even for 100-file batches.
+  - Per-account auth state: each account independently tracks OAuth flow,
+    token expiry, and service-account fallback.
+  - Aggregate sync across all configured accounts in one call, deduplicating
+    by Drive file-ID so the same file in two folders isn't double-processed.
+  - Retry logic: each download retried up to DRIVE_DOWNLOAD_RETRIES times
+    with exponential back-off before being counted as a failure.
+  - Graceful degradation: if one account fails to authenticate or a folder
+    is unreachable, the others continue and the error is surfaced per-account.
 """
 
 from __future__ import annotations
@@ -16,11 +26,9 @@ import json
 import os
 import time
 import uuid
-import ssl
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import parse_qs, urlparse
@@ -33,11 +41,10 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 # ── Tuning constants ──────────────────────────────────────────────────────────
-DRIVE_DOWNLOAD_WORKERS = int(os.getenv("DRIVE_DOWNLOAD_WORKERS", "6"))
-DRIVE_DOWNLOAD_WORKER_HARD_CAP = int(os.getenv("DRIVE_DOWNLOAD_WORKER_HARD_CAP", "2"))
+DRIVE_DOWNLOAD_WORKERS  = int(os.getenv("DRIVE_DOWNLOAD_WORKERS",  "6"))
 DRIVE_DOWNLOAD_CHUNK_MB = int(os.getenv("DRIVE_DOWNLOAD_CHUNK_MB", "8"))
-DRIVE_DOWNLOAD_RETRIES = int(os.getenv("DRIVE_DOWNLOAD_RETRIES", "3"))
-DRIVE_ACCOUNTS_FILE = BASE_DIR / "data" / "drive_accounts.json"
+DRIVE_DOWNLOAD_RETRIES  = int(os.getenv("DRIVE_DOWNLOAD_RETRIES",  "3"))
+DRIVE_ACCOUNTS_FILE     = BASE_DIR / "data" / "drive_accounts.json"
 
 SUPPORTED_MIME_TYPES = {
     "application/pdf",
@@ -51,8 +58,8 @@ SUPPORTED_MIME_TYPES = {
     "application/vnd.google-apps.spreadsheet",
     "application/vnd.google-apps.presentation",
 }
-FOLDER_MIME = "application/vnd.google-apps.folder"
-DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+FOLDER_MIME  = "application/vnd.google-apps.folder"
+DRIVE_SCOPE  = "https://www.googleapis.com/auth/drive.readonly"
 
 
 # ── Data models ───────────────────────────────────────────────────────────────
@@ -60,105 +67,92 @@ DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 @dataclass
 class DriveAccount:
     """Represents a single connected Google Drive account / folder."""
-    account_id: str
-    label: str
-    folder_id: str
-    token_path: str
-    client_path: str
-    sa_path: str
-    enabled: bool = True
+    account_id  : str           # stable UUID assigned at registration
+    label       : str           # human-readable name set by user
+    folder_id   : str           # Drive folder (or file) ID to sync
+    token_path  : str           # path to persisted OAuth token JSON
+    client_path : str           # path to OAuth client JSON
+    sa_path     : str           # path to service-account JSON (fallback)
+    enabled     : bool = True
 
     def to_dict(self) -> dict:
         return {
-            "account_id": self.account_id,
-            "label": self.label,
-            "folder_id": self.folder_id,
-            "token_path": self.token_path,
-            "client_path": self.client_path,
-            "sa_path": self.sa_path,
-            "enabled": self.enabled,
+            "account_id"  : self.account_id,
+            "label"       : self.label,
+            "folder_id"   : self.folder_id,
+            "token_path"  : self.token_path,
+            "client_path" : self.client_path,
+            "sa_path"     : self.sa_path,
+            "enabled"     : self.enabled,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "DriveAccount":
         return cls(
-            account_id=d["account_id"],
-            label=d.get("label", d["account_id"]),
-            folder_id=d.get("folder_id", ""),
-            token_path=d.get("token_path", ""),
-            client_path=d.get("client_path", ""),
-            sa_path=d.get("sa_path", ""),
-            enabled=d.get("enabled", True),
+            account_id  = d["account_id"],
+            label       = d.get("label", d["account_id"]),
+            folder_id   = d.get("folder_id", ""),
+            token_path  = d.get("token_path", ""),
+            client_path = d.get("client_path", ""),
+            sa_path     = d.get("sa_path", ""),
+            enabled     = d.get("enabled", True),
         )
 
 
 @dataclass
 class AccountSyncResult:
-    account_id: str
-    label: str
-    new: int = 0
-    updated: int = 0
-    skipped: int = 0
-    failed: int = 0
-    total: int = 0
-    error: str = ""
-    auth_mode: str = ""
-    duration_s: float = 0.0
+    account_id : str
+    label      : str
+    new        : int = 0
+    updated    : int = 0
+    skipped    : int = 0
+    failed     : int = 0
+    total      : int = 0
+    error      : str = ""
+    auth_mode  : str = ""
+    duration_s : float = 0.0
 
 
 @dataclass
 class MultiSyncResult:
-    accounts: list[AccountSyncResult] = field(default_factory=list)
-    total_new: int = 0
-    total_updated: int = 0
-    total_skipped: int = 0
-    total_failed: int = 0
-    total_files: int = 0
-    duration_s: float = 0.0
+    accounts       : list[AccountSyncResult] = field(default_factory=list)
+    total_new      : int = 0
+    total_updated  : int = 0
+    total_skipped  : int = 0
+    total_failed   : int = 0
+    total_files    : int = 0
+    duration_s     : float = 0.0
 
     def add(self, r: AccountSyncResult) -> None:
         self.accounts.append(r)
-        self.total_new += r.new
+        self.total_new     += r.new
         self.total_updated += r.updated
         self.total_skipped += r.skipped
-        self.total_failed += r.failed
-        self.total_files += r.total
+        self.total_failed  += r.failed
+        self.total_files   += r.total
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 class _AccountClient:
     """
     Wraps the Google Drive API client for a single DriveAccount.
-    Uses a thread-local cached service so concurrent workers do not share
-    the same googleapiclient/httplib2/SSL stack.
+    Handles auth, listing, and streaming download with retry.
     """
 
     def __init__(self, account: DriveAccount) -> None:
-        self.account = account
-        self._thread_local = threading.local()
-        self._mode: str = ""
-        self._refresh_lock = threading.Lock()
+        self.account  = account
+        self._svc     = None
+        self._mode    : str = ""
 
     # ── Auth ──────────────────────────────────────────────────────────────────
 
-    def _clear_thread_service(self) -> None:
-        if hasattr(self._thread_local, "svc"):
-            delattr(self._thread_local, "svc")
-        if hasattr(self._thread_local, "mode"):
-            delattr(self._thread_local, "mode")
-
-    def _build(self, creds):
-        from googleapiclient.discovery import build
-        return build("drive", "v3", credentials=creds, cache_discovery=False)
-
     def get_service(self):
-        svc = getattr(self._thread_local, "svc", None)
-        if svc is not None:
-            return svc
+        if self._svc is not None:
+            return self._svc
 
-        token_path = Path(self.account.token_path)
+        token_path  = Path(self.account.token_path)
         client_path = Path(self.account.client_path)
-        sa_path = Path(self.account.sa_path)
+        sa_path     = Path(self.account.sa_path)
 
         try:
             from google.auth.transport.requests import Request
@@ -169,24 +163,12 @@ class _AccountClient:
                 creds = Credentials.from_authorized_user_file(
                     str(token_path), scopes=[DRIVE_SCOPE],
                 )
-
                 if creds and creds.expired and creds.refresh_token:
-                    # Protect refresh so multiple worker threads do not refresh
-                    # the same token at exactly the same time.
-                    with self._refresh_lock:
-                        creds = Credentials.from_authorized_user_file(
-                            str(token_path), scopes=[DRIVE_SCOPE],
-                        )
-                        if creds and creds.expired and creds.refresh_token:
-                            creds.refresh(Request())
-                            token_path.parent.mkdir(parents=True, exist_ok=True)
-                            token_path.write_text(creds.to_json(), encoding="utf-8")
-
-                svc = self._build(creds)
-                self._thread_local.svc = svc
-                self._thread_local.mode = "oauth_user"
+                    creds.refresh(Request())
+                    token_path.write_text(creds.to_json(), encoding="utf-8")
+                self._svc  = self._build(creds)
                 self._mode = "oauth_user"
-                return svc
+                return self._svc
 
             # 2 — Service account
             if sa_path.exists():
@@ -194,21 +176,23 @@ class _AccountClient:
                 creds = service_account.Credentials.from_service_account_file(
                     str(sa_path), scopes=[DRIVE_SCOPE],
                 )
-                svc = self._build(creds)
-                self._thread_local.svc = svc
-                self._thread_local.mode = "service_account"
+                self._svc  = self._build(creds)
                 self._mode = "service_account"
-                return svc
+                return self._svc
 
         except Exception as e:
             logger.error("[%s] Auth failed: %s", self.account.label, e)
-            self._clear_thread_service()
 
         return None
 
+    @staticmethod
+    def _build(creds):
+        from googleapiclient.discovery import build
+        return build("drive", "v3", credentials=creds, cache_discovery=False)
+
     @property
     def auth_mode(self) -> str:
-        return getattr(self._thread_local, "mode", self._mode)
+        return self._mode
 
     def get_auth_url(self) -> str | None:
         """Return OAuth consent URL if client JSON exists but no token yet."""
@@ -218,12 +202,12 @@ class _AccountClient:
 
         try:
             from requests_oauthlib import OAuth2Session
-            cfg = json.loads(client_path.read_text())
-            info = cfg.get("web") or cfg.get("installed") or cfg
-            client_id = info["client_id"]
-            auth_uri = info.get("auth_uri", "https://accounts.google.com/o/oauth2/auth")
-            redirect = self._redirect_uri()
-            oauth = OAuth2Session(
+            cfg        = json.loads(client_path.read_text())
+            info       = cfg.get("web") or cfg.get("installed") or cfg
+            client_id  = info["client_id"]
+            auth_uri   = info.get("auth_uri", "https://accounts.google.com/o/oauth2/auth")
+            redirect   = self._redirect_uri()
+            oauth      = OAuth2Session(
                 client_id=client_id,
                 redirect_uri=redirect,
                 scope=[DRIVE_SCOPE],
@@ -237,26 +221,23 @@ class _AccountClient:
             return None
 
     def exchange_code(self, code: str) -> bool:
-        """Exchange OAuth code for token, persist to token_path."""
+        """Exchange OAuth code for token, persist to token_path. Returns success."""
         client_path = Path(self.account.client_path)
         if not client_path.exists():
             return False
-
         try:
             from requests_oauthlib import OAuth2Session
             from google.oauth2.credentials import Credentials
 
-            cfg = json.loads(client_path.read_text())
-            info = cfg.get("web") or cfg.get("installed") or cfg
-            client_id = info["client_id"]
+            cfg        = json.loads(client_path.read_text())
+            info       = cfg.get("web") or cfg.get("installed") or cfg
+            client_id  = info["client_id"]
             client_sec = info["client_secret"]
-            token_uri = info.get("token_uri", "https://oauth2.googleapis.com/token")
-            redirect = self._redirect_uri()
+            token_uri  = info.get("token_uri", "https://oauth2.googleapis.com/token")
+            redirect   = self._redirect_uri()
 
             oauth = OAuth2Session(
-                client_id=client_id,
-                redirect_uri=redirect,
-                scope=[DRIVE_SCOPE],
+                client_id=client_id, redirect_uri=redirect, scope=[DRIVE_SCOPE],
             )
             token = oauth.fetch_token(
                 token_uri, code=code,
@@ -265,16 +246,13 @@ class _AccountClient:
             creds = Credentials(
                 token=token.get("access_token"),
                 refresh_token=token.get("refresh_token"),
-                token_uri=token_uri,
-                client_id=client_id,
-                client_secret=client_sec,
-                scopes=[DRIVE_SCOPE],
+                token_uri=token_uri, client_id=client_id,
+                client_secret=client_sec, scopes=[DRIVE_SCOPE],
             )
             token_p = Path(self.account.token_path)
             token_p.parent.mkdir(parents=True, exist_ok=True)
             token_p.write_text(creds.to_json(), encoding="utf-8")
-
-            self._clear_thread_service()
+            self._svc  = None   # force re-auth with new token
             self._mode = ""
             return True
         except Exception as e:
@@ -314,6 +292,7 @@ class _AccountClient:
             return []
 
         if root_info.get("mimeType") != FOLDER_MIME:
+            # Single file
             if self._is_supported(root_info):
                 return [self._enrich(root_info)]
             return []
@@ -332,7 +311,7 @@ class _AccountClient:
                             "nextPageToken, files("
                             "id, name, mimeType, modifiedTime, md5Checksum, size)"
                         ),
-                        pageSize=1000,
+                        pageSize=1000,   # max allowed by API
                         pageToken=page_token,
                         includeItemsFromAllDrives=True,
                         supportsAllDrives=True,
@@ -359,7 +338,7 @@ class _AccountClient:
     def download(self, file_id: str, mime_type: str | None) -> bytes:
         """
         Download a single file with retries and chunked streaming.
-        Clears the per-thread Drive client after SSL/network-related failures.
+        Raises RuntimeError after DRIVE_DOWNLOAD_RETRIES failed attempts.
         """
         last_err: Exception | None = None
         chunk_bytes = DRIVE_DOWNLOAD_CHUNK_MB * 1024 * 1024
@@ -369,14 +348,11 @@ class _AccountClient:
                 return self._download_once(file_id, mime_type, chunk_bytes)
             except Exception as e:
                 last_err = e
-                self._clear_thread_service()
-
                 wait = 2 ** (attempt - 1)
                 logger.warning(
                     "[%s] Download %s attempt %d/%d failed: %s — retrying in %ds",
                     self.account.label, file_id, attempt, DRIVE_DOWNLOAD_RETRIES, e, wait,
                 )
-
                 if attempt < DRIVE_DOWNLOAD_RETRIES:
                     time.sleep(wait)
 
@@ -386,25 +362,22 @@ class _AccountClient:
 
     def _download_once(self, file_id: str, mime_type: str | None, chunk_bytes: int) -> bytes:
         from googleapiclient.http import MediaIoBaseDownload
-
         svc = self.get_service()
         if svc is None:
             raise RuntimeError("Drive service not available")
 
         if mime_type and mime_type.startswith("application/vnd.google-apps."):
             request = svc.files().export(
-                fileId=file_id,
-                mimeType="application/pdf",
+                fileId=file_id, mimeType="application/pdf",
                 supportsAllDrives=True,
             )
         else:
             request = svc.files().get_media(
-                fileId=file_id,
-                supportsAllDrives=True,
+                fileId=file_id, supportsAllDrives=True,
             )
 
         buf = io.BytesIO()
-        dl = MediaIoBaseDownload(buf, request, chunksize=chunk_bytes)
+        dl  = MediaIoBaseDownload(buf, request, chunksize=chunk_bytes)
         done = False
         while not done:
             _, done = dl.next_chunk()
@@ -421,9 +394,10 @@ class _AccountClient:
         )
 
     def _enrich(self, item: dict) -> dict:
+        """Tag each file with which account it came from."""
         item = dict(item)
         item["_account_id"] = self.account.account_id
-        item["_label"] = self.account.label
+        item["_label"]      = self.account.label
         return item
 
 
@@ -431,12 +405,22 @@ class _AccountClient:
 class MultiDriveService:
     """
     Manages multiple Google Drive accounts and syncs them in parallel.
+
+    Public API
+    ----------
+    add_account(label, folder_id, client_path, sa_path) -> DriveAccount
+    remove_account(account_id)
+    list_accounts() -> list[DriveAccount]
+    get_auth_url(account_id) -> str | None
+    exchange_code(account_id, code) -> bool
+    sync_all(on_progress, on_file_done) -> MultiSyncResult
+    sync_account(account_id, on_progress, on_file_done) -> AccountSyncResult
     """
 
     def __init__(self) -> None:
-        self._accounts: dict[str, DriveAccount] = {}
-        self._clients: dict[str, _AccountClient] = {}
-        self.upload_dir = UPLOAD_DIR
+        self._accounts   : dict[str, DriveAccount] = {}
+        self._clients    : dict[str, _AccountClient] = {}
+        self.upload_dir  = UPLOAD_DIR
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self._load_accounts()
         logger.info("MultiDriveService initialised — %d accounts", len(self._accounts))
@@ -445,26 +429,30 @@ class MultiDriveService:
 
     def add_account(
         self,
-        label: str,
-        folder_id: str,
-        client_path: str = "",
-        sa_path: str = "",
+        label       : str,
+        folder_id   : str,
+        client_path : str = "",
+        sa_path     : str = "",
     ) -> DriveAccount:
+        """
+        Register a new Drive account.
+        A unique token path is auto-assigned under data/ so tokens never collide.
+        """
         account_id = str(uuid.uuid4())
-        data_dir = BASE_DIR / "data"
+        data_dir   = BASE_DIR / "data"
         token_path = str(data_dir / f"drive_token_{account_id[:8]}.json")
 
         account = DriveAccount(
-            account_id=account_id,
-            label=label.strip() or f"Drive {len(self._accounts) + 1}",
-            folder_id=self._parse_folder_id(folder_id),
-            token_path=token_path,
-            client_path=client_path or str(data_dir / "google_oauth_client.json"),
-            sa_path=sa_path or str(BASE_DIR / "credentials.json"),
-            enabled=True,
+            account_id  = account_id,
+            label       = label.strip() or f"Drive {len(self._accounts) + 1}",
+            folder_id   = self._parse_folder_id(folder_id),
+            token_path  = token_path,
+            client_path = client_path or str(data_dir / "google_oauth_client.json"),
+            sa_path     = sa_path or str(BASE_DIR / "credentials.json"),
+            enabled     = True,
         )
         self._accounts[account_id] = account
-        self._clients[account_id] = _AccountClient(account)
+        self._clients[account_id]  = _AccountClient(account)
         self._save_accounts()
         logger.info("Added Drive account '%s' (%s)", account.label, account_id[:8])
         return account
@@ -489,6 +477,7 @@ class MultiDriveService:
                     v = self._parse_folder_id(v)
                 object.__setattr__(acc, k, v)
         self._save_accounts()
+        # Rebuild client with updated config
         self._clients[account_id] = _AccountClient(acc)
         return True
 
@@ -514,7 +503,8 @@ class MultiDriveService:
         return client.exchange_code(code) if client else False
 
     def get_account_status(self, account_id: str) -> dict:
-        acc = self._accounts.get(account_id)
+        """Return auth/config status for a single account."""
+        acc    = self._accounts.get(account_id)
         client = self._clients.get(account_id)
         if not acc or not client:
             return {"status": "not_found"}
@@ -522,20 +512,20 @@ class MultiDriveService:
         if not acc.folder_id:
             return {"status": "missing_folder", "label": acc.label}
 
-        token_exists = Path(acc.token_path).exists()
+        token_exists  = Path(acc.token_path).exists()
         client_exists = Path(acc.client_path).exists()
-        sa_exists = Path(acc.sa_path).exists()
+        sa_exists     = Path(acc.sa_path).exists()
 
         if token_exists and client_exists:
-            return {"status": "ready", "auth_mode": "oauth_user", "label": acc.label}
+            return {"status": "ready", "auth_mode": "oauth_user",  "label": acc.label}
         if sa_exists:
             return {"status": "ready", "auth_mode": "service_account", "label": acc.label}
         if client_exists:
             auth_url = client.get_auth_url()
             return {
-                "status": "oauth_login_required",
-                "auth_mode": "oauth_user",
-                "label": acc.label,
+                "status"           : "oauth_login_required",
+                "auth_mode"        : "oauth_user",
+                "label"            : acc.label,
                 "authorization_url": auth_url,
             }
         return {"status": "missing_credentials", "label": acc.label}
@@ -544,10 +534,16 @@ class MultiDriveService:
 
     def sync_all(
         self,
-        on_progress: Optional[Callable[[str, str, int, int], None]] = None,
-        on_file_done: Optional[Callable[[str, str, str | None], None]] = None,
+        on_progress  : Optional[Callable[[str, str, int, int], None]] = None,
+        on_file_done : Optional[Callable[[str, str, str | None], None]] = None,
     ) -> MultiSyncResult:
-        t0 = time.monotonic()
+        """
+        Sync all enabled accounts.
+
+        on_progress(account_label, filename, current_idx, total)
+        on_file_done(account_label, filename, error_or_None)
+        """
+        t0     = time.monotonic()
         result = MultiSyncResult()
 
         enabled = [a for a in self._accounts.values() if a.enabled]
@@ -558,12 +554,12 @@ class MultiDriveService:
         for account in enabled:
             logger.info("Syncing account '%s' …", account.label)
             acc_result = self.sync_account(
-                account_id=account.account_id,
-                on_progress=(
+                account_id   = account.account_id,
+                on_progress  = (
                     (lambda lbl: lambda fn, i, t: on_progress(lbl, fn, i, t))(account.label)
                     if on_progress else None
                 ),
-                on_file_done=(
+                on_file_done = (
                     (lambda lbl: lambda fn, err: on_file_done(lbl, fn, err))(account.label)
                     if on_file_done else None
                 ),
@@ -580,17 +576,21 @@ class MultiDriveService:
 
     def sync_account(
         self,
-        account_id: str,
-        on_progress: Optional[Callable[[str, int, int], None]] = None,
-        on_file_done: Optional[Callable[[str, str | None], None]] = None,
+        account_id   : str,
+        on_progress  : Optional[Callable[[str, int, int], None]] = None,
+        on_file_done : Optional[Callable[[str, str | None], None]] = None,
     ) -> AccountSyncResult:
-        acc = self._accounts.get(account_id)
+        """
+        Sync a single account using a parallel download pool.
+        Downloads up to DRIVE_DOWNLOAD_WORKERS files concurrently.
+        """
+        acc    = self._accounts.get(account_id)
         client = self._clients.get(account_id)
-        t0 = time.monotonic()
+        t0     = time.monotonic()
 
         r = AccountSyncResult(
-            account_id=account_id,
-            label=acc.label if acc else account_id,
+            account_id = account_id,
+            label      = acc.label if acc else account_id,
         )
 
         if not acc or not client:
@@ -599,7 +599,7 @@ class MultiDriveService:
 
         status = self.get_account_status(account_id)
         if status["status"] not in ("ready",):
-            r.error = f"Account not ready: {status['status']}"
+            r.error    = f"Account not ready: {status['status']}"
             r.auth_mode = status.get("auth_mode", "")
             return r
 
@@ -611,7 +611,7 @@ class MultiDriveService:
             logger.error("[%s] list_files failed: %s", acc.label, e)
             return r
 
-        r.total = len(files)
+        r.total    = len(files)
         r.auth_mode = client.auth_mode
 
         if not files:
@@ -621,7 +621,7 @@ class MultiDriveService:
         # 2 — Classify: skip unchanged, queue new/updated
         to_download: list[dict] = []
         for item in files:
-            fid = item["id"]
+            fid      = item["id"]
             existing = repository.get_document_by_drive_file_id(fid)
             if (
                 existing is not None
@@ -640,20 +640,18 @@ class MultiDriveService:
         if not to_download:
             return r
 
+        # 3 — Parallel download + persist
         sync_run = repository.create_sync_run(acc.folder_id, r.total)
 
         def _do_one(item: dict) -> tuple[dict, bytes | None, str | None]:
+            """Download one file. Returns (item, bytes_or_None, error_or_None)."""
             try:
                 data = client.download(item["id"], item.get("mimeType"))
                 return item, data, None
             except Exception as e:
                 return item, None, str(e)
 
-        workers = min(
-            max(1, DRIVE_DOWNLOAD_WORKERS),
-            max(1, DRIVE_DOWNLOAD_WORKER_HARD_CAP),
-            len(to_download),
-        )
+        workers = min(DRIVE_DOWNLOAD_WORKERS, len(to_download))
         done_count = 0
 
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="drive_dl") as pool:
@@ -662,13 +660,12 @@ class MultiDriveService:
             for future in as_completed(futures):
                 item, file_bytes, dl_error = future.result()
                 done_count += 1
-
-                name = item.get("name", item["id"])
-                fid = item["id"]
+                name      = item.get("name", item["id"])
+                fid       = item["id"]
                 mime_type = item.get("mimeType", "")
-                md5 = item.get("md5Checksum", "")
-                size = int(item.get("size", 0) or 0)
-                mod_time = _parse_time(item.get("modifiedTime"))
+                md5       = item.get("md5Checksum", "")
+                size      = int(item.get("size", 0) or 0)
+                mod_time  = _parse_time(item.get("modifiedTime"))
 
                 if on_progress:
                     try:
@@ -700,8 +697,8 @@ class MultiDriveService:
                     continue
 
                 # Persist to disk
-                safe = _sanitize(output_name)
-                dest = self.upload_dir / f"{fid}_{safe}"
+                safe  = _sanitize(output_name)
+                dest  = self.upload_dir / f"{fid}_{safe}"
                 try:
                     dest.write_bytes(file_bytes)
                 except OSError as e:
@@ -715,46 +712,46 @@ class MultiDriveService:
                     continue
 
                 # DB upsert
-                existing = repository.get_document_by_drive_file_id(fid)
-                existing_pk = getattr(existing, "id", None)
+                existing    = repository.get_document_by_drive_file_id(fid)
+                existing_pk = getattr(existing, "id",     None)
                 existing_id = getattr(existing, "doc_id", None)
 
                 try:
                     if existing is not None and existing_id:
                         repository.update_document_file(
-                            doc_id=existing_id,
-                            local_path=str(dest),
-                            checksum=md5,
-                            modified_time=mod_time,
-                            file_size_bytes=size or len(file_bytes),
-                            status=DocumentStatus.UPLOADED,
-                            source="drive",
-                            source_folder=acc.folder_id,
-                            drive_file_id=fid,
+                            doc_id         = existing_id,
+                            local_path     = str(dest),
+                            checksum       = md5,
+                            modified_time  = mod_time,
+                            file_size_bytes= size or len(file_bytes),
+                            status         = DocumentStatus.UPLOADED,
+                            source         = "drive",
+                            source_folder  = acc.folder_id,
+                            drive_file_id  = fid,
                         )
                         r.updated += 1
                     else:
-                        doc_id = str(uuid.uuid4())
+                        doc_id  = str(uuid.uuid4())
                         created = repository.create_document(
-                            doc_id=doc_id,
-                            filename=name,
-                            local_path=str(dest),
-                            file_size_bytes=size or len(file_bytes),
-                            mime_type="application/pdf",
-                            source_folder=acc.folder_id,
-                            drive_file_id=fid,
-                            checksum=md5,
-                            modified_time=mod_time,
-                            source="drive",
-                            status=DocumentStatus.UPLOADED,
+                            doc_id          = doc_id,
+                            filename        = name,
+                            local_path      = str(dest),
+                            file_size_bytes = size or len(file_bytes),
+                            mime_type       = "application/pdf",
+                            source_folder   = acc.folder_id,
+                            drive_file_id   = fid,
+                            checksum        = md5,
+                            modified_time   = mod_time,
+                            source          = "drive",
+                            status          = DocumentStatus.UPLOADED,
                         )
                         existing_pk = getattr(created, "id", None)
                         r.new += 1
 
                     repository.create_ingestion_job(
-                        document_id=existing_pk,
-                        drive_file_id=fid,
-                        source="drive",
+                        document_id   = existing_pk,
+                        drive_file_id = fid,
+                        source        = "drive",
                     )
                 except Exception as e:
                     r.failed += 1
@@ -772,17 +769,14 @@ class MultiDriveService:
                     except Exception:
                         pass
 
-        try:
-            repository.finish_sync_run(
-                sync_run=sync_run,
-                status="completed",
-                new_files=r.new,
-                updated_files=r.updated,
-                skipped_files=r.skipped,
-                failed_files=r.failed,
-            )
-        except Exception as e:
-            logger.error("[%s] Could not finish sync run: %s", acc.label, e)
+        repository.finish_sync_run(
+            sync_run      = sync_run,
+            status        = "completed",
+            new_files     = r.new,
+            updated_files = r.updated,
+            skipped_files = r.skipped,
+            failed_files  = r.failed,
+        )
 
         r.duration_s = round(time.monotonic() - t0, 2)
         logger.info(
@@ -800,6 +794,7 @@ class MultiDriveService:
 
     def _load_accounts(self) -> None:
         if not DRIVE_ACCOUNTS_FILE.exists():
+            # Migrate single-account config from env if present
             self._migrate_legacy()
             return
         try:
@@ -807,20 +802,24 @@ class MultiDriveService:
             for d in data:
                 acc = DriveAccount.from_dict(d)
                 self._accounts[acc.account_id] = acc
-                self._clients[acc.account_id] = _AccountClient(acc)
+                self._clients[acc.account_id]  = _AccountClient(acc)
         except Exception as e:
             logger.error("Failed to load drive accounts: %s", e)
 
     def _migrate_legacy(self) -> None:
+        """
+        If the old single-account env vars are set, import them as account #1
+        so existing deployments don't break.
+        """
         folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "").strip()
         if not folder_id:
             return
         data_dir = BASE_DIR / "data"
         self.add_account(
-            label="Default Drive",
-            folder_id=folder_id,
-            client_path=str(data_dir / "google_oauth_client.json"),
-            sa_path=str(BASE_DIR / "credentials.json"),
+            label       = "Default Drive",
+            folder_id   = folder_id,
+            client_path = str(data_dir / "google_oauth_client.json"),
+            sa_path     = str(BASE_DIR / "credentials.json"),
         )
         logger.info("Migrated legacy single-account Drive config")
 
@@ -835,7 +834,7 @@ class MultiDriveService:
             parsed = urlparse(raw)
             if parsed.scheme in ("http", "https"):
                 parts = parsed.path.strip("/").split("/")
-                qs = parse_qs(parsed.query)
+                qs    = parse_qs(parsed.query)
                 if "folders" in parts:
                     idx = parts.index("folders")
                     if idx + 1 < len(parts):
