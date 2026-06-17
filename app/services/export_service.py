@@ -30,7 +30,9 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from html import unescape
 
@@ -38,6 +40,11 @@ from app.services.pdf_service import pdf_service
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Number of documents loaded/processed in parallel during export row
+# collection. Each pdf_service.load_document() call is 3 independent DB
+# queries; parallelising removes the dominant cost on 50-100 doc exports.
+EXPORT_WORKERS = int(os.getenv("EXPORT_WORKERS", "6"))
 
 # ── Column templates ──────────────────────────────────────────────────────────
 
@@ -350,94 +357,107 @@ class ExportService:
     # ── Journal Articles data collection ─────────────────────────────────────
 
     def _collect_rows(self, doc_ids: list[str]) -> list[dict]:
-        seen: set[str] = set()
-        rows: list[dict] = []
+        """
+        Loads and maps each document to a journal-template row.
 
-        for doc_id in doc_ids:
-            if doc_id in seen:
-                continue
-            seen.add(doc_id)
+        Runs across a thread pool (EXPORT_WORKERS, default 6) instead of
+        a sequential loop. Each pdf_service.load_document() call is 3
+        independent DB queries (document, sections, chunks); for a 50-100
+        document export that's 150-300 sequential round trips done one at
+        a time previously. Parallelising this is a straightforward win
+        since each document's row is fully independent of every other's.
 
-            try:
-                doc = pdf_service.load_document(doc_id)
-                if not doc:
-                    rows.append(_error_row(doc_id, "Document not found"))
-                    continue
+        Input order and dedup-by-doc_id behaviour are both preserved:
+        executor.map() returns results in the same order its inputs were
+        submitted, so the output row order always matches doc_ids (after
+        removing duplicates), regardless of which worker finishes first.
+        """
+        ordered_ids = list(dict.fromkeys(doc_ids))  # dedupe, preserve order
+        if not ordered_ids:
+            return []
 
-                m      = doc.metadata
-                first3 = "\n".join((doc.full_text or "").split("\n\n")[:60])
-                full   = doc.full_text or ""
+        workers = min(EXPORT_WORKERS, len(ordered_ids))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="export_journal") as pool:
+            return list(pool.map(self._build_journal_row, ordered_ids))
 
-                title        = _clean(m.title or "") or _clean(doc.filename.replace(".pdf", ""))
-                authors_list = _dedupe_authors(
-                    [_clean(a) for a in (m.authors or []) if a.strip()]
-                    or _fallback_authors(full, title)
-                )
-                authors      = " || ".join(authors_list)
+    def _build_journal_row(self, doc_id: str) -> dict:
+        try:
+            doc = pdf_service.load_document(doc_id)
+            if not doc:
+                return _error_row(doc_id, "Document not found")
 
-                # FIX: use getattr with None default for optional Pydantic v2 fields
-                editor    = _clean(getattr(m, "editor",  None) or "") or _extract_editor_fb(first3)
-                year      = _clean(getattr(m, "year",    None) or "")
-                date      = year or _parse_date(getattr(m, "created_at", None) or "")
-                pages_raw = _clean(getattr(m, "pages",   None) or "") or _extract_pages_fb(first3)
-                # FIX: guard page_count — may not exist on all schema versions
-                page_count_val = getattr(m, "page_count", None) or 0
-                page_no   = pages_raw or (str(page_count_val) if page_count_val else "")
+            m      = doc.metadata
+            first3 = "\n".join((doc.full_text or "").split("\n\n")[:60])
+            full   = doc.full_text or ""
 
-                abstract = ""
-                for sec in (doc.sections or []):
-                    if sec.section_type.value == "abstract":
-                        abstract = sec.content[:2000].strip()
-                        break
-                if not abstract:
-                    abstract = _clean(getattr(m, "abstract", None) or "")[:2000]
-                if not abstract:
-                    abstract = _extract_abstract_fb(full[:5000])
+            title        = _clean(m.title or "") or _clean(doc.filename.replace(".pdf", ""))
+            authors_list = _dedupe_authors(
+                [_clean(a) for a in (m.authors or []) if a.strip()]
+                or _fallback_authors(full, title)
+            )
+            authors      = " || ".join(authors_list)
 
-                sponsor   = _clean(getattr(m, "funding",       None) or "") or _extract_funding_fb(full[:8000])
-                doi       = _clean(getattr(m, "doi",           None) or "") or _extract_doi(first3)
-                issn      = _clean(getattr(m, "issn",          None) or "") or _extract_issn(first3)
-                publisher = _clean(getattr(m, "publisher",     None) or "") or _extract_publisher(first3)
-                journal   = _clean(getattr(m, "journal",       None) or "") or _extract_journal(first3)
-                volume    = _clean(getattr(m, "volume",        None) or "") or _extract_volume(first3)
-                issue     = _clean(getattr(m, "issue",         None) or "") or _extract_issue(first3)
-                kws       = list(getattr(m, "keywords", None) or []) or _extract_keywords_list(full)
-                keywords  = " || ".join(_clean(k) for k in kws if k.strip())
-                art_type  = _clean(getattr(m, "article_type",  None) or "") or _extract_article_type_fb(first3)
-                citation  = _build_citation(
-                    title=title, authors=authors_list, date=date,
-                    journal=journal, volume=volume, issue=issue,
-                    pages=pages_raw, doi=doi, publisher=publisher,
-                )
+            # FIX: use getattr with None default for optional Pydantic v2 fields
+            editor    = _clean(getattr(m, "editor",  None) or "") or _extract_editor_fb(first3)
+            year      = _clean(getattr(m, "year",    None) or "")
+            date      = year or _parse_date(getattr(m, "created_at", None) or "")
+            pages_raw = _clean(getattr(m, "pages",   None) or "") or _extract_pages_fb(first3)
+            # FIX: guard page_count — may not exist on all schema versions
+            page_count_val = getattr(m, "page_count", None) or 0
+            page_no   = pages_raw or (str(page_count_val) if page_count_val else "")
 
-                rows.append({
-                    "name original" : doc.filename,
-                    "authors"       : authors,
-                    "editor"        : editor,
-                    "date"          : date,
-                    "page no"       : page_no,
-                    "abstract"      : abstract,
-                    "sponsor"       : sponsor,
-                    "citation"      : citation,
-                    "doi"           : doi,
-                    "issn"          : issn,
-                    "publisher"     : publisher,
-                    "keywords"      : keywords,
-                    "title"         : title,
-                    "type"          : art_type or "Research Article",
-                    "issue"         : issue,
-                    "volume"        : volume,
-                    "_filename"     : doc.filename,
-                    "_doc_id"       : doc.doc_id,
-                    "_journal"      : journal,
-                    "_error"        : False,
-                })
+            abstract = ""
+            for sec in (doc.sections or []):
+                if sec.section_type.value == "abstract":
+                    abstract = sec.content[:2000].strip()
+                    break
+            if not abstract:
+                abstract = _clean(getattr(m, "abstract", None) or "")[:2000]
+            if not abstract:
+                abstract = _extract_abstract_fb(full[:5000])
 
-            except Exception as e:
-                logger.error("Export failed for %s: %s", doc_id, e, exc_info=True)
-                rows.append(_error_row(doc_id, str(e)))
+            sponsor   = _clean(getattr(m, "funding",       None) or "") or _extract_funding_fb(full[:8000])
+            doi       = _clean(getattr(m, "doi",           None) or "") or _extract_doi(first3)
+            issn      = _clean(getattr(m, "issn",          None) or "") or _extract_issn(first3)
+            publisher = _clean(getattr(m, "publisher",     None) or "") or _extract_publisher(first3)
+            journal   = _clean(getattr(m, "journal",       None) or "") or _extract_journal(first3)
+            volume    = _clean(getattr(m, "volume",        None) or "") or _extract_volume(first3)
+            issue     = _clean(getattr(m, "issue",         None) or "") or _extract_issue(first3)
+            kws       = list(getattr(m, "keywords", None) or []) or _extract_keywords_list(full)
+            keywords  = " || ".join(_clean(k) for k in kws if k.strip())
+            art_type  = _clean(getattr(m, "article_type",  None) or "") or _extract_article_type_fb(first3)
+            citation  = _build_citation(
+                title=title, authors=authors_list, date=date,
+                journal=journal, volume=volume, issue=issue,
+                pages=pages_raw, doi=doi, publisher=publisher,
+            )
 
-        return rows
+            return {
+                "name original" : doc.filename,
+                "authors"       : authors,
+                "editor"        : editor,
+                "date"          : date,
+                "page no"       : page_no,
+                "abstract"      : abstract,
+                "sponsor"       : sponsor,
+                "citation"      : citation,
+                "doi"           : doi,
+                "issn"          : issn,
+                "publisher"     : publisher,
+                "keywords"      : keywords,
+                "title"         : title,
+                "type"          : art_type or "Research Article",
+                "issue"         : issue,
+                "volume"        : volume,
+                "_filename"     : doc.filename,
+                "_doc_id"       : doc.doc_id,
+                "_journal"      : journal,
+                "_error"        : False,
+            }
+
+        except Exception as e:
+            logger.error("Export failed for %s: %s", doc_id, e, exc_info=True)
+            return _error_row(doc_id, str(e))
 
     # ── PhD Theses data collection ────────────────────────────────────────────
 
@@ -446,90 +466,90 @@ class ExportService:
         Maps extracted metadata to the For_PhD_theses.xlsx column format:
           author | date | dc.description | abstract | citation |
           publisher | dc.subject | dc.title | dc.type
+
+        Parallelised the same way as _collect_rows (see its docstring).
         """
-        seen: set[str] = set()
-        rows: list[dict] = []
+        ordered_ids = list(dict.fromkeys(doc_ids))
+        if not ordered_ids:
+            return []
 
-        for doc_id in doc_ids:
-            if doc_id in seen:
-                continue
-            seen.add(doc_id)
+        workers = min(EXPORT_WORKERS, len(ordered_ids))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="export_thesis") as pool:
+            return list(pool.map(self._build_thesis_row, ordered_ids))
 
-            try:
-                doc = pdf_service.load_document(doc_id)
-                if not doc:
-                    rows.append(_error_thesis_row(doc_id, "Document not found"))
-                    continue
+    def _build_thesis_row(self, doc_id: str) -> dict:
+        try:
+            doc = pdf_service.load_document(doc_id)
+            if not doc:
+                return _error_thesis_row(doc_id, "Document not found")
 
-                m      = doc.metadata
-                first3 = "\n".join((doc.full_text or "").split("\n\n")[:60])
-                full   = doc.full_text or ""
+            m      = doc.metadata
+            first3 = "\n".join((doc.full_text or "").split("\n\n")[:60])
+            full   = doc.full_text or ""
 
-                # dc.title
-                dc_title = _clean(getattr(m, "title", None) or "") or _clean(doc.filename.replace(".pdf", ""))
+            # dc.title
+            dc_title = _clean(getattr(m, "title", None) or "") or _clean(doc.filename.replace(".pdf", ""))
 
-                # author — thesis usually has one author
-                # FIX: all getattr calls use None default for Pydantic v2 compat
-                authors_list = _dedupe_authors(
-                    [_clean(a) for a in (getattr(m, "authors", None) or []) if a.strip()]
-                    or _fallback_authors(full, dc_title)
-                )
-                author = _format_thesis_author(authors_list[0]) if authors_list else ""
+            # author — thesis usually has one author
+            # FIX: all getattr calls use None default for Pydantic v2 compat
+            authors_list = _dedupe_authors(
+                [_clean(a) for a in (getattr(m, "authors", None) or []) if a.strip()]
+                or _fallback_authors(full, dc_title)
+            )
+            author = _format_thesis_author(authors_list[0]) if authors_list else ""
 
-                # date
-                year = _clean(getattr(m, "year", None) or "")
-                date = year or _parse_date(getattr(m, "created_at", None) or "")
-                date = date[:4] if date else ""
+            # date
+            year = _clean(getattr(m, "year", None) or "")
+            date = year or _parse_date(getattr(m, "created_at", None) or "")
+            date = date[:4] if date else ""
 
-                # dc.description — physical description e.g. "xvi, 172p."
-                dc_description = _extract_physical_description(full[:3000])
+            # dc.description — physical description e.g. "xvi, 172p."
+            dc_description = _extract_physical_description(full[:3000])
 
-                # abstract
-                abstract = ""
-                for sec in (doc.sections or []):
-                    if sec.section_type.value == "abstract":
-                        abstract = sec.content[:2000].strip()
-                        break
-                if not abstract:
-                    abstract = _clean(getattr(m, "abstract", None) or "")[:2000]
-                if not abstract:
-                    abstract = _extract_abstract_fb(full[:5000])
+            # abstract
+            abstract = ""
+            for sec in (doc.sections or []):
+                if sec.section_type.value == "abstract":
+                    abstract = sec.content[:2000].strip()
+                    break
+            if not abstract:
+                abstract = _clean(getattr(m, "abstract", None) or "")[:2000]
+            if not abstract:
+                abstract = _extract_abstract_fb(full[:5000])
 
-                # publisher — for theses: "Department, Faculty, University"
-                publisher = _clean(getattr(m, "publisher", None) or "") or _extract_thesis_publisher(full[:3000])
+            # publisher — for theses: "Department, Faculty, University"
+            publisher = _clean(getattr(m, "publisher", None) or "") or _extract_thesis_publisher(full[:3000])
 
-                # dc.subject — keywords
-                kws     = list(getattr(m, "keywords", None) or []) or _extract_keywords_list(full)
-                dc_subj = " || ".join(_clean(k) for k in kws if k.strip())
+            # dc.subject — keywords
+            kws     = list(getattr(m, "keywords", None) or []) or _extract_keywords_list(full)
+            dc_subj = " || ".join(_clean(k) for k in kws if k.strip())
 
-                # citation — thesis format
-                citation = _build_thesis_citation(
-                    title     = dc_title,
-                    author    = author,
-                    date      = date,
-                    publisher = publisher,
-                )
+            # citation — thesis format
+            citation = _build_thesis_citation(
+                title     = dc_title,
+                author    = author,
+                date      = date,
+                publisher = publisher,
+            )
 
-                rows.append({
-                    "author"        : author,
-                    "date"          : date,
-                    "dc.description": dc_description,
-                    "abstract"      : abstract,
-                    "citation"      : citation,
-                    "publisher"     : publisher,
-                    "dc.subject"    : dc_subj,
-                    "dc.title"      : dc_title,
-                    "dc.type"       : "Thesis",
-                    "_filename"     : doc.filename,
-                    "_doc_id"       : doc.doc_id,
-                    "_error"        : False,
-                })
+            return {
+                "author"        : author,
+                "date"          : date,
+                "dc.description": dc_description,
+                "abstract"      : abstract,
+                "citation"      : citation,
+                "publisher"     : publisher,
+                "dc.subject"    : dc_subj,
+                "dc.title"      : dc_title,
+                "dc.type"       : "Thesis",
+                "_filename"     : doc.filename,
+                "_doc_id"       : doc.doc_id,
+                "_error"        : False,
+            }
 
-            except Exception as e:
-                logger.error("Thesis export failed for %s: %s", doc_id, e, exc_info=True)
-                rows.append(_error_thesis_row(doc_id, str(e)))
-
-        return rows
+        except Exception as e:
+            logger.error("Thesis export failed for %s: %s", doc_id, e, exc_info=True)
+            return _error_thesis_row(doc_id, str(e))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
