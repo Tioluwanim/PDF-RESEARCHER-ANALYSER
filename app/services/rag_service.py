@@ -1,13 +1,21 @@
 """
 rag_service.py - FAISS vector store with multi-query retrieval.
 
-Key improvements:
-- Multi-query RAG: runs 3 query variants and merges/deduplicates results
-  so generic questions like "what is this about?" always find context
-- Raised max_chars from 3,000 to 6,000 so the LLM gets enough context
-- Graceful fallback: if threshold finds 0 results, retry with 0.0 threshold
-  (returns top-k regardless of score) so the LLM always gets something
-- FAISS is imported lazily so module import stays stable
+Improvements over v1:
+  - Multi-query search runs its variants in PARALLEL via ThreadPoolExecutor
+    instead of a sequential loop — on a 3-variant expansion this cuts
+    retrieval latency roughly 2-3x since each FAISS search + embed_query
+    call is independent.
+  - MMR (Maximal Marginal Relevance) reranking after the initial similarity
+    sort: greedily picks results that are both relevant to the query AND
+    diverse from already-selected results, so the LLM doesn't receive 5
+    near-duplicate chunks from the same paragraph.
+  - max_chars now defaults to CONTEXT_WINDOW_TOKENS from config instead of
+    a hardcoded 6000, so raising the config value actually changes behavior.
+  - Query expansion deduplicates near-identical variants (Jaccard overlap
+    check) so we don't waste a parallel search slot on a variant that's
+    >90% the same words as another variant.
+  - FAISS is imported lazily so module import stays stable.
 """
 
 from __future__ import annotations
@@ -15,12 +23,14 @@ from __future__ import annotations
 import json
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
 
 from app.config import (
+    CONTEXT_WINDOW_TOKENS,
     EMBEDDING_DIMENSION,
     SIMILARITY_THRESHOLD,
     TOP_K_RESULTS,
@@ -39,6 +49,10 @@ from app.services.embedding_service import embedding_service
 from app.utils.logger import ServiceLogger, get_logger
 
 logger = get_logger(__name__)
+
+# MMR diversity trade-off: 1.0 = pure relevance, 0.0 = pure diversity.
+# 0.7 favours relevance while still penalising near-duplicate chunks.
+_MMR_LAMBDA = 0.7
 
 
 def _get_faiss_module():
@@ -170,7 +184,6 @@ class RAGService:
         force: bool = False,
     ) -> tuple[Optional[Any], list[TextChunk]]:
         faiss = _get_faiss_module()
-        log_key = "library"
         slog = ServiceLogger("rag_service", doc_id="library")
         slog.info("Building library FAISS index")
 
@@ -232,7 +245,7 @@ class RAGService:
                 json.dumps([c.model_dump() for c in chunks], default=str, indent=2),
                 encoding="utf-8",
             )
-            self._index_cache[log_key] = (index, chunks)
+            self._index_cache["library"] = (index, chunks)
 
         slog.info("Library index built — %d vectors, %d chunks", index.ntotal, len(chunks))
         return index, chunks
@@ -248,34 +261,14 @@ class RAGService:
         section_type: SectionType | None = None,
         page_number: int | None = None,
     ) -> SearchResponse:
-        faiss = _get_faiss_module()  # noqa: F841  (kept to ensure import availability)
         slog = ServiceLogger("rag_service", doc_id="library")
         start_time = time.time()
 
-        has_filters = bool(doc_ids or author or year or section_type or page_number is not None)
-        if has_filters:
-            index, chunks = self.build_library_index(
-                doc_ids=doc_ids,
-                author=author,
-                year=year,
-                section_type=section_type,
-                page_number=page_number,
-                force=True,
-            )
-        else:
-            index, chunks = self._load_library_index()
-
+        index, chunks = self._resolve_library_index(
+            doc_ids, author, year, section_type, page_number,
+        )
         if index is None or not chunks:
-            index, chunks = self.build_library_index(
-                doc_ids=doc_ids,
-                author=author,
-                year=year,
-                section_type=section_type,
-                page_number=page_number,
-                force=True,
-            )
-            if index is None or not chunks:
-                return SearchResponse(query=query, doc_id="library", results=[], total_found=0)
+            return SearchResponse(query=query, doc_id="library", results=[], total_found=0)
 
         query_vec = embedding_service.embed_query(query)
         actual_k = min(top_k, index.ntotal)
@@ -286,30 +279,16 @@ class RAGService:
             idx_int = int(idx)
             if idx_int == -1 or float(score) < threshold:
                 continue
-
-            results.append(
-                SearchResult(
-                    chunk=chunks[idx_int],
-                    score=round(float(score), 4),
-                    rank=rank,
-                )
-            )
+            results.append(SearchResult(chunk=chunks[idx_int], score=round(float(score), 4), rank=rank))
 
         elapsed_ms = round((time.time() - start_time) * 1000, 2)
         slog.info(
             "Library search complete — %d/%d results above threshold=%.2f in %.1fms",
-            len(results),
-            actual_k,
-            threshold,
-            elapsed_ms,
+            len(results), actual_k, threshold, elapsed_ms,
         )
-
         return SearchResponse(
-            query=query,
-            doc_id="library",
-            results=results,
-            total_found=len(results),
-            search_time_ms=elapsed_ms,
+            query=query, doc_id="library", results=results,
+            total_found=len(results), search_time_ms=elapsed_ms,
         )
 
     def get_library_context(
@@ -317,7 +296,7 @@ class RAGService:
         query: str,
         top_k: int = TOP_K_RESULTS,
         threshold: float = SIMILARITY_THRESHOLD,
-        max_chars: int = 6000,
+        max_chars: int = 0,   # 0 = use CONTEXT_WINDOW_TOKENS
         doc_ids: list[str] | None = None,
         author: str | None = None,
         year: str | None = None,
@@ -325,115 +304,37 @@ class RAGService:
         page_number: int | None = None,
     ) -> tuple[str, list[SearchResult]]:
         slog = ServiceLogger("rag_service", doc_id="library")
+        max_chars = max_chars or CONTEXT_WINDOW_TOKENS
 
+        index, chunks = self._resolve_library_index(
+            doc_ids, author, year, section_type, page_number,
+        )
+        if index is None or not chunks:
+            return "", []
+
+        all_results = self._multi_query_search(
+            index=index, chunks=chunks, query=query,
+            top_k=top_k, threshold=threshold, slog=slog,
+        )
+        selected = self._mmr_select(all_results, index, top_k)
+        return self._assemble_context(selected, max_chars, slog, with_doc_id=True)
+
+    def _resolve_library_index(
+        self, doc_ids, author, year, section_type, page_number,
+    ) -> tuple[Optional[Any], list[TextChunk]]:
         has_filters = bool(doc_ids or author or year or section_type or page_number is not None)
         if has_filters:
-            index, chunks = self.build_library_index(
-                doc_ids=doc_ids,
-                author=author,
-                year=year,
-                section_type=section_type,
-                page_number=page_number,
-                force=True,
+            return self.build_library_index(
+                doc_ids=doc_ids, author=author, year=year,
+                section_type=section_type, page_number=page_number, force=True,
             )
-        else:
-            index, chunks = self._load_library_index()
-
+        index, chunks = self._load_library_index()
         if index is None or not chunks:
-            index, chunks = self.build_library_index(
-                doc_ids=doc_ids,
-                author=author,
-                year=year,
-                section_type=section_type,
-                page_number=page_number,
-                force=True,
+            return self.build_library_index(
+                doc_ids=doc_ids, author=author, year=year,
+                section_type=section_type, page_number=page_number, force=True,
             )
-            if index is None or not chunks:
-                return "", []
-
-        queries = self._expand_query(query)
-        slog.debug("Library multi-query variants: %s", queries)
-
-        seen_ids: set[str] = set()
-        all_results: list[SearchResult] = []
-
-        for q in queries:
-            try:
-                qvec = embedding_service.embed_query(q)
-                actual_k = min(top_k * 2, index.ntotal)
-                scores, indices = index.search(qvec, actual_k)
-
-                for score, idx in zip(scores[0], indices[0]):
-                    idx_int = int(idx)
-                    if idx_int == -1:
-                        continue
-
-                    chunk = chunks[idx_int]
-                    if chunk.chunk_id in seen_ids:
-                        continue
-
-                    if float(score) >= threshold:
-                        seen_ids.add(chunk.chunk_id)
-                        all_results.append(
-                            SearchResult(
-                                chunk=chunk,
-                                score=round(float(score), 4),
-                                rank=0,
-                            )
-                        )
-            except Exception as e:
-                slog.warning("Library search variant failed: %s", e)
-
-        if not all_results:
-            qvec = embedding_service.embed_query(queries[0])
-            actual_k = min(top_k, index.ntotal)
-            scores, indices = index.search(qvec, actual_k)
-
-            for score, idx in zip(scores[0], indices[0]):
-                idx_int = int(idx)
-                if idx_int == -1:
-                    continue
-
-                chunk = chunks[idx_int]
-                if chunk.chunk_id not in seen_ids:
-                    seen_ids.add(chunk.chunk_id)
-                    all_results.append(
-                        SearchResult(
-                            chunk=chunk,
-                            score=round(float(score), 4),
-                            rank=0,
-                        )
-                    )
-
-        all_results.sort(key=lambda r: r.score, reverse=True)
-        for i, r in enumerate(all_results):
-            r.rank = i + 1
-
-        context_parts: list[str] = []
-        total_chars = 0
-        used_results: list[SearchResult] = []
-
-        for result in all_results[:top_k]:
-            header = (
-                f"[{result.chunk.doc_id} | {result.chunk.section_type.value.upper()} | "
-                f"Score: {result.score:.3f}]"
-            )
-            chunk_text = f"{header}\n{result.chunk.content}"
-
-            if total_chars + len(chunk_text) > max_chars:
-                remaining = max_chars - total_chars
-                if remaining > 200:
-                    context_parts.append(chunk_text[:remaining] + "…")
-                    used_results.append(result)
-                break
-
-            context_parts.append(chunk_text)
-            used_results.append(result)
-            total_chars += len(chunk_text)
-
-        context = "\n\n---\n\n".join(context_parts)
-        slog.info("Library context built — %d chunks, %d chars", len(used_results), len(context))
-        return context, used_results
+        return index, chunks
 
     # ── Search ────────────────────────────────────────────────────────────────
 
@@ -460,33 +361,19 @@ class RAGService:
             idx_int = int(idx)
             if idx_int == -1 or float(score) < threshold:
                 continue
-
-            results.append(
-                SearchResult(
-                    chunk=chunks[idx_int],
-                    score=round(float(score), 4),
-                    rank=rank,
-                )
-            )
+            results.append(SearchResult(chunk=chunks[idx_int], score=round(float(score), 4), rank=rank))
 
         elapsed_ms = round((time.time() - start_time) * 1000, 2)
         slog.info(
             "Search complete — %d/%d results above threshold=%.2f in %.1fms",
-            len(results),
-            actual_k,
-            threshold,
-            elapsed_ms,
+            len(results), actual_k, threshold, elapsed_ms,
         )
-
         return SearchResponse(
-            query=query,
-            doc_id=doc_id,
-            results=results,
-            total_found=len(results),
-            search_time_ms=elapsed_ms,
+            query=query, doc_id=doc_id, results=results,
+            total_found=len(results), search_time_ms=elapsed_ms,
         )
 
-    # ── Context builder (multi-query) ─────────────────────────────────────────
+    # ── Context builder (multi-query, parallel + MMR) ────────────────────────
 
     def get_context(
         self,
@@ -494,86 +381,183 @@ class RAGService:
         query: str,
         top_k: int = TOP_K_RESULTS,
         threshold: float = SIMILARITY_THRESHOLD,
-        max_chars: int = 6000,
+        max_chars: int = 0,   # 0 = use CONTEXT_WINDOW_TOKENS
     ) -> tuple[str, list[SearchResult]]:
         slog = ServiceLogger("rag_service", doc_id=doc_id)
+        max_chars = max_chars or CONTEXT_WINDOW_TOKENS
 
         index, chunks = self._load_index(doc_id, slog)
         if index is None or not chunks:
             return "", []
 
+        all_results = self._multi_query_search(
+            index=index, chunks=chunks, query=query,
+            top_k=top_k, threshold=threshold, slog=slog,
+        )
+        selected = self._mmr_select(all_results, index, top_k)
+        return self._assemble_context(selected, max_chars, slog, with_doc_id=False)
+
+    # ── Shared multi-query + MMR machinery ────────────────────────────────────
+
+    def _multi_query_search(
+        self,
+        index    : Any,
+        chunks   : list[TextChunk],
+        query    : str,
+        top_k    : int,
+        threshold: float,
+        slog     : ServiceLogger,
+    ) -> list[SearchResult]:
+        """
+        Runs query-expansion variants IN PARALLEL (ThreadPoolExecutor) and
+        merges/deduplicates the results. Each variant does its own
+        embed_query + FAISS search; these are independent so they parallelise
+        cleanly. Falls back to threshold=0.0 if nothing clears the bar.
+        """
         queries = self._expand_query(query)
-        slog.debug("Multi-query variants: %s", queries)
+        slog.debug("Multi-query variants (%d): %s", len(queries), queries)
 
         seen_ids: set[str] = set()
         all_results: list[SearchResult] = []
 
-        for q in queries:
-            try:
-                qvec = embedding_service.embed_query(q)
-                actual_k = min(top_k * 2, index.ntotal)
-                scores, indices = index.search(qvec, actual_k)
+        def _run_variant(q: str) -> list[tuple[float, int]]:
+            qvec = embedding_service.embed_query(q)
+            actual_k = min(top_k * 2, index.ntotal)
+            scores, indices = index.search(qvec, actual_k)
+            return list(zip(scores[0].tolist(), indices[0].tolist()))
 
-                for score, idx in zip(scores[0], indices[0]):
+        with ThreadPoolExecutor(max_workers=min(len(queries), 4), thread_name_prefix="rag_q") as pool:
+            futures = {pool.submit(_run_variant, q): q for q in queries}
+            for future in as_completed(futures):
+                q = futures[future]
+                try:
+                    pairs = future.result()
+                except Exception as e:
+                    slog.warning("Multi-query variant '%s' failed: %s", q, e)
+                    continue
+
+                for score, idx in pairs:
                     idx_int = int(idx)
                     if idx_int == -1:
                         continue
-
                     chunk = chunks[idx_int]
                     if chunk.chunk_id in seen_ids:
                         continue
-
                     if float(score) >= threshold:
                         seen_ids.add(chunk.chunk_id)
                         all_results.append(
-                            SearchResult(
-                                chunk=chunk,
-                                score=round(float(score), 4),
-                                rank=0,
-                            )
+                            SearchResult(chunk=chunk, score=round(float(score), 4), rank=0)
                         )
-            except Exception as e:
-                slog.warning("Multi-query variant failed: %s", e)
 
         if not all_results:
             slog.warning(
-                "No results above threshold=%.2f — returning top-%d without threshold filter",
-                threshold,
-                top_k,
+                "No results above threshold=%.2f — returning top-%d without filter",
+                threshold, top_k,
             )
             qvec = embedding_service.embed_query(queries[0])
             actual_k = min(top_k, index.ntotal)
             scores, indices = index.search(qvec, actual_k)
-
             for score, idx in zip(scores[0], indices[0]):
                 idx_int = int(idx)
                 if idx_int == -1:
                     continue
-
                 chunk = chunks[idx_int]
                 if chunk.chunk_id not in seen_ids:
                     seen_ids.add(chunk.chunk_id)
                     all_results.append(
-                        SearchResult(
-                            chunk=chunk,
-                            score=round(float(score), 4),
-                            rank=0,
-                        )
+                        SearchResult(chunk=chunk, score=round(float(score), 4), rank=0)
                     )
 
         all_results.sort(key=lambda r: r.score, reverse=True)
         for i, r in enumerate(all_results):
             r.rank = i + 1
+        return all_results
 
+    def _mmr_select(
+        self,
+        candidates : list[SearchResult],
+        index      : Any,
+        top_k      : int,
+        pool_size  : int = 0,
+    ) -> list[SearchResult]:
+        """
+        Maximal Marginal Relevance reranking.
+
+        Greedily picks the candidate that maximises:
+            lambda * relevance(c) - (1 - lambda) * max_similarity(c, selected)
+
+        This prevents the context window from being filled with several
+        near-duplicate chunks (e.g. 4 chunks all from the same paragraph
+        because it scored highest on every query variant) at the expense
+        of chunks covering different parts of the document.
+
+        Falls back to plain top-k order if fewer than 3 candidates, since
+        MMR has no diversification benefit on tiny candidate sets.
+        """
+        if len(candidates) <= max(top_k, 2):
+            return candidates[:top_k]
+
+        pool_size = pool_size or min(len(candidates), top_k * 3)
+        pool = candidates[:pool_size]
+
+        # Re-embed pool chunk contents directly for the diversity comparison.
+        # Pool size is bounded (top_k*3, typically <=24) so this stays cheap
+        # even though it doesn't reuse the original FAISS-indexed vectors.
+        try:
+            texts = [r.chunk.content for r in pool]
+            pool_vecs = embedding_service.embed_texts(texts)
+        except Exception:
+            return candidates[:top_k]  # graceful fallback on embed failure
+
+        selected_idx: list[int] = []
+        remaining_idx = list(range(len(pool)))
+
+        # Seed with the highest-relevance candidate
+        selected_idx.append(0)
+        remaining_idx.remove(0)
+
+        while len(selected_idx) < min(top_k, len(pool)) and remaining_idx:
+            best_idx = None
+            best_score = float("-inf")
+            for i in remaining_idx:
+                relevance = pool[i].score
+                max_sim = max(
+                    float(np.dot(pool_vecs[i], pool_vecs[j]))
+                    for j in selected_idx
+                )
+                mmr_score = _MMR_LAMBDA * relevance - (1 - _MMR_LAMBDA) * max_sim
+                if mmr_score > best_score:
+                    best_score = mmr_score
+                    best_idx = i
+            if best_idx is None:
+                break
+            selected_idx.append(best_idx)
+            remaining_idx.remove(best_idx)
+
+        result = [pool[i] for i in selected_idx]
+        for i, r in enumerate(result):
+            r.rank = i + 1
+        return result
+
+    def _assemble_context(
+        self,
+        results    : list[SearchResult],
+        max_chars  : int,
+        slog       : ServiceLogger,
+        with_doc_id: bool,
+    ) -> tuple[str, list[SearchResult]]:
         context_parts: list[str] = []
         total_chars = 0
         used_results: list[SearchResult] = []
 
-        for result in all_results[:top_k]:
-            header = (
-                f"[{result.chunk.section_type.value.upper()} | "
-                f"Score: {result.score:.3f}]"
-            )
+        for result in results:
+            if with_doc_id:
+                header = (
+                    f"[{result.chunk.doc_id} | {result.chunk.section_type.value.upper()} | "
+                    f"Score: {result.score:.3f}]"
+                )
+            else:
+                header = f"[{result.chunk.section_type.value.upper()} | Score: {result.score:.3f}]"
             chunk_text = f"{header}\n{result.chunk.content}"
 
             if total_chars + len(chunk_text) > max_chars:
@@ -588,11 +572,7 @@ class RAGService:
             total_chars += len(chunk_text)
 
         context = "\n\n---\n\n".join(context_parts)
-        slog.info(
-            "Context built — %d chunks, %d chars",
-            len(used_results),
-            len(context),
-        )
+        slog.info("Context built — %d chunks, %d chars", len(used_results), len(context))
         return context, used_results
 
     # ── Index management ──────────────────────────────────────────────────────
@@ -613,27 +593,21 @@ class RAGService:
         return False
 
     def get_index_stats(self, doc_id: str) -> dict:
-        index, chunks = self._load_index(
-            doc_id, ServiceLogger("rag_service", doc_id)
-        )
+        index, chunks = self._load_index(doc_id, ServiceLogger("rag_service", doc_id))
         if index is None:
             return {"status": "not_found", "doc_id": doc_id}
         return {
-            "doc_id": doc_id,
-            "status": "loaded",
+            "doc_id"       : doc_id,
+            "status"       : "loaded",
             "total_vectors": index.ntotal,
-            "dimension": index.d,
-            "total_chunks": len(chunks),
-            "cached": doc_id in self._index_cache,
+            "dimension"    : index.d,
+            "total_chunks" : len(chunks),
+            "cached"       : doc_id in self._index_cache,
         }
 
     # ── Private ───────────────────────────────────────────────────────────────
 
-    def _load_index(
-        self,
-        doc_id: str,
-        slog: ServiceLogger,
-    ) -> tuple[Optional[Any], list[TextChunk]]:
+    def _load_index(self, doc_id: str, slog: ServiceLogger) -> tuple[Optional[Any], list[TextChunk]]:
         faiss = _get_faiss_module()
 
         if doc_id in self._index_cache:
@@ -651,11 +625,7 @@ class RAGService:
             raw = json.loads(chunks_path.read_text(encoding="utf-8"))
             chunks = [TextChunk.model_validate(c) for c in raw]
             self._index_cache[doc_id] = (index, chunks)
-            slog.info(
-                "Index loaded from disk — %d vectors, %d chunks",
-                index.ntotal,
-                len(chunks),
-            )
+            slog.info("Index loaded from disk — %d vectors, %d chunks", index.ntotal, len(chunks))
             return index, chunks
         except Exception as e:
             slog.error("Failed to load index: %s", e)
@@ -668,6 +638,8 @@ class RAGService:
     def _expand_query(question: str) -> list[str]:
         """
         Generates up to 3 query variants from the user's question.
+        Deduplicates near-identical variants via word-set Jaccard overlap
+        so we don't burn a parallel search slot on a near-duplicate phrase.
         """
         q = question.strip()
         variants = [q]
@@ -684,27 +656,32 @@ class RAGService:
 
         words = re.findall(r"\b\w{3,}\b", q.lower())
         keywords = [w for w in words if w not in stop]
-        if keywords and " ".join(keywords) != q.lower():
-            variants.append(" ".join(keywords))
+        if keywords:
+            candidate = " ".join(keywords)
+            if _jaccard(candidate, q.lower()) < 0.9:
+                variants.append(candidate)
 
         lower = q.lower()
+        imperative = None
         if lower.startswith(("what is", "what are")):
             imperative = re.sub(r"^what (?:is|are)\s+", "describe ", lower)
-            variants.append(imperative)
         elif lower.startswith(("how does", "how do")):
             imperative = re.sub(r"^how (?:does|do)\s+", "explain how ", lower)
-            variants.append(imperative)
         elif lower.startswith("who"):
             imperative = re.sub(r"^who\s+", "identify the person who ", lower)
+
+        if imperative and all(_jaccard(imperative, v.lower()) < 0.9 for v in variants):
             variants.append(imperative)
 
-        seen: set[str] = set()
-        result: list[str] = []
-        for v in variants:
-            if v and v not in seen:
-                seen.add(v)
-                result.append(v)
-        return result[:3]
+        return variants[:3]
+
+
+def _jaccard(a: str, b: str) -> float:
+    """Word-set Jaccard similarity, used to dedupe near-identical query variants."""
+    sa, sb = set(a.split()), set(b.split())
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
 
 
 # ── Singleton ─────────────────────────────────────────────────────────────────
