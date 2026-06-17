@@ -568,7 +568,9 @@ EMBEDDING_DIMENSION = _env_int("EMBEDDING_DIMENSION", 384)
 # =============================================================================
 
 CHUNK_SIZE = _env_int("CHUNK_SIZE", 500)
-CHUNK_OVERLAP = _env_int("CHUNK_OVERLAP", 50)
+# 20% overlap (was 10%) — academic paper sentences/ideas frequently span
+# chunk boundaries; more overlap means fewer broken thoughts at retrieval time.
+CHUNK_OVERLAP = _env_int("CHUNK_OVERLAP", 100)
 
 SECTION_KEYWORDS: dict[str, list[str]] = {
     "abstract": [
@@ -634,7 +636,7 @@ SIMILARITY_THRESHOLD = _env_float("SIMILARITY_THRESHOLD", 0.05)
 
 MAX_TOKENS = _env_int("MAX_TOKENS", 2048)
 TEMPERATURE = _env_float("TEMPERATURE", 0.3)
-CONTEXT_WINDOW_TOKENS = _env_int("CONTEXT_WINDOW_TOKENS", 6000)
+CONTEXT_WINDOW_TOKENS = _env_int("CONTEXT_WINDOW_TOKENS", 8000)
 
 # =============================================================================
 # RETRY
