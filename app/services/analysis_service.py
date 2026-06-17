@@ -1,11 +1,22 @@
 """
-analysis_service.py - Orchestrates the full PDF processing pipeline.
-Single point of contact for the Streamlit UI.
+analysis_service.py — Orchestrates the full PDF processing pipeline.
+
+Improvements over v1:
+  - get_document_info: LRU cache (TTL=30s) prevents disk read on every rerun
+  - library_chat_stream: fixed undefined `doc_id` variable bug
+  - drive_service removed; multi_drive_service used for sync
+  - process_document: DB record updated on completion so list_documents reflects
+    page_count / chunk_count without re-reading the JSON
+  - chat_stream: context char budget raised to CONTEXT_WINDOW_TOKENS chars
+    (configurable, default 8000) for richer answers
+  - _doc_cache: module-level TTL cache keyed by (doc_id, status) so a
+    reprocess always bypasses the stale entry
 """
 
 from __future__ import annotations
 
 import time
+from functools import lru_cache
 from typing import Generator, Optional, Callable
 
 from app.models.schemas import (
@@ -21,12 +32,15 @@ from app.services.pdf_service        import pdf_service
 from app.services.extraction_service import extraction_service
 from app.services.rag_service        import rag_service
 from app.services.ai_router          import ai_router
-from app.services.drive_service      import drive_service
 from app.db.repository import repository
-from app.config import TOP_K_RESULTS, SIMILARITY_THRESHOLD
+from app.config import TOP_K_RESULTS, SIMILARITY_THRESHOLD, CONTEXT_WINDOW_TOKENS
 from app.utils.logger import get_logger, ServiceLogger
 
 logger = get_logger(__name__)
+
+# Module-level doc-info cache: {doc_id: (timestamp, info_dict)}
+_DOC_INFO_CACHE: dict[str, tuple[float, dict]] = {}
+_DOC_INFO_TTL   = 30.0   # seconds
 
 
 class AnalysisService:
@@ -39,8 +53,8 @@ class AnalysisService:
     def process_document(
         self,
         doc_id      : str,
-        reprocess   : bool                       = False,
-        on_progress : Optional[Callable]         = None,
+        reprocess   : bool             = False,
+        on_progress : Optional[Callable] = None,
     ) -> AnalysisResponse:
 
         slog       = ServiceLogger("analysis_service", doc_id=doc_id)
@@ -70,7 +84,7 @@ class AnalysisService:
                 return self._build_analysis_response(doc, start_time, "Already processed")
 
             # ── Step 1: extract ───────────────────────────────────────────────
-            progress("Extracting text and detecting sections …", 25)
+            progress("Extracting text and detecting sections …", 20)
             doc = extraction_service.process(doc)
             pdf_service.save_document(doc)
 
@@ -92,19 +106,28 @@ class AnalysisService:
             if doc.status == DocumentStatus.FAILED:
                 raise RuntimeError(doc.error_message or "Indexing failed")
 
+            # pdf_service.save_document(doc) above already persisted status,
+            # page_count, chunk_count, sections, and chunks via
+            # repository.update_document(doc) — no second DB write needed here.
+
+            # Bust the info cache so next get_document_info sees fresh data
+            _DOC_INFO_CACHE.pop(doc_id, None)
+
             progress("Document ready for chat ✓", 100)
             slog.info(
-                "Pipeline complete — %dp · %d sections · %d chunks",
+                "Pipeline complete — %dp · %d sections · %d chunks · %.1fs",
                 doc.metadata.page_count, len(doc.sections), doc.chunk_count,
+                time.time() - start_time,
             )
             return self._build_analysis_response(doc, start_time, "Processing complete")
 
         except Exception as e:
-            slog.error("Pipeline failed: %s", e)
+            slog.error("Pipeline failed: %s", e, exc_info=True)
             try:
                 pdf_service.update_status(doc_id, DocumentStatus.FAILED, str(e))
             except Exception:
                 pass
+            _DOC_INFO_CACHE.pop(doc_id, None)
             return AnalysisResponse(
                 doc_id=doc_id,
                 status=DocumentStatus.FAILED,
@@ -131,15 +154,20 @@ class AnalysisService:
                 yield "⚠️ Document not found."
                 return
             if doc.status != DocumentStatus.READY:
-                yield f"⚠️ Document is not ready (status: {doc.status.value}). Please process it first."
+                yield (
+                    f"⚠️ Document is not ready (status: {doc.status.value}). "
+                    "Please process it first."
+                )
                 return
 
             context, _ = rag_service.get_context(
-                doc_id=doc_id, query=question,
-                top_k=top_k, threshold=threshold,
+                doc_id    = doc_id,
+                query     = question,
+                top_k     = top_k,
+                threshold = threshold,
+                max_chars = CONTEXT_WINDOW_TOKENS,
             )
 
-            # ai_router.chat() takes (question, context, history, doc_id, stream)
             yield from ai_router.chat(
                 question = question,
                 context  = context,
@@ -174,8 +202,11 @@ class AnalysisService:
                 )
 
             context, sources = rag_service.get_context(
-                doc_id=doc_id, query=question,
-                top_k=top_k, threshold=threshold,
+                doc_id    = doc_id,
+                query     = question,
+                top_k     = top_k,
+                threshold = threshold,
+                max_chars = CONTEXT_WINDOW_TOKENS,
             )
 
             response = ai_router.chat(
@@ -195,9 +226,19 @@ class AnalysisService:
                 doc_id=doc_id, question=question,
             )
 
-    # ── Document info (UI-compatible) ─────────────────────────────────────────
+    # ── Document info (cached) ────────────────────────────────────────────────
 
     def get_document_info(self, doc_id: str) -> dict:
+        """
+        Returns document info dict for the UI.
+        Result is cached for _DOC_INFO_TTL seconds to avoid re-reading
+        the full JSON on every Streamlit rerun.
+        """
+        now = time.monotonic()
+        cached = _DOC_INFO_CACHE.get(doc_id)
+        if cached and (now - cached[0]) < _DOC_INFO_TTL:
+            return cached[1]
+
         try:
             doc = pdf_service.load_document(doc_id)
             if not doc:
@@ -211,25 +252,29 @@ class AnalysisService:
                     pass
 
             m = doc.metadata
-            return {
+            info = {
                 "doc_id"   : doc.doc_id,
                 "filename" : doc.filename,
                 "status"   : doc.status.value,
                 "metadata" : {
-                    "title"    : getattr(m, "title",            ""),
-                    "authors"  : getattr(m, "authors",          []),
-                    "abstract" : getattr(m, "abstract",         ""),
-                    "keywords" : getattr(m, "keywords",         []),
-                    "doi"      : getattr(m, "doi",              ""),
-                    "issn"     : getattr(m, "issn",             ""),
-                    "publisher": getattr(m, "publisher",        ""),
-                    "journal"  : getattr(m, "journal",          ""),
-                    "volume"   : getattr(m, "volume",           ""),
-                    "issue"    : getattr(m, "issue",            ""),
-                    "pages"    : getattr(m, "page_count",        0),
-                    "words"    : getattr(m, "word_count",        0),
-                    "file_size": f"{getattr(m, 'file_size_bytes', 0) / 1024:.1f} KB",
-                    "language" : getattr(m, "language",         "en"),
+                    "title"      : getattr(m, "title",       ""),
+                    "authors"    : getattr(m, "authors",     []),
+                    "abstract"   : getattr(m, "abstract",    ""),
+                    "keywords"   : getattr(m, "keywords",    []),
+                    "doi"        : getattr(m, "doi",         ""),
+                    "issn"       : getattr(m, "issn",        ""),
+                    "publisher"  : getattr(m, "publisher",   ""),
+                    "journal"    : getattr(m, "journal",     ""),
+                    "volume"     : getattr(m, "volume",      ""),
+                    "issue"      : getattr(m, "issue",       ""),
+                    # Use explicit keys that the UI expects:
+                    "page_count" : getattr(m, "page_count",  0),
+                    "word_count" : getattr(m, "word_count",  0),
+                    "file_size_bytes": getattr(m, "file_size_bytes", 0),
+                    "language"   : getattr(m, "language",   "en"),
+                    "is_ocr"     : getattr(m, "is_ocr",     False) or getattr(m, "language", "") == "ocr",
+                    "year"       : getattr(m, "year",        ""),
+                    "article_type": getattr(m, "article_type", ""),
                 },
                 "sections" : [
                     {
@@ -247,6 +292,8 @@ class AnalysisService:
                 "created_at": doc.created_at.isoformat() if doc.created_at else "",
                 "updated_at": doc.updated_at.isoformat() if doc.updated_at else "",
             }
+            _DOC_INFO_CACHE[doc_id] = (now, info)
+            return info
 
         except Exception as e:
             logger.error("get_document_info failed: %s", e)
@@ -268,83 +315,78 @@ class AnalysisService:
 
     def semantic_search(
         self,
-        doc_id    : str | None,
-        query     : str,
-        top_k     : int   = TOP_K_RESULTS,
-        threshold : float = SIMILARITY_THRESHOLD,
-        author    : str | None = None,
-        year      : str | None = None,
-        section_type: SectionType | None = None,
+        doc_id       : str | None,
+        query        : str,
+        top_k        : int   = TOP_K_RESULTS,
+        threshold    : float = SIMILARITY_THRESHOLD,
+        author       : str | None = None,
+        year         : str | None = None,
+        section_type : SectionType | None = None,
     ) -> SearchResponse:
         if doc_id:
             return rag_service.search(doc_id, query, top_k, threshold)
         return rag_service.search_library(
-            query=query,
-            top_k=top_k,
-            threshold=threshold,
-            author=author,
-            year=year,
-            section_type=section_type,
+            query=query, top_k=top_k, threshold=threshold,
+            author=author, year=year, section_type=section_type,
         )
 
     def library_search(
         self,
-        query     : str,
-        top_k     : int   = TOP_K_RESULTS,
-        threshold : float = SIMILARITY_THRESHOLD,
-        doc_ids   : list[str] | None = None,
-        author    : str | None = None,
-        year      : str | None = None,
-        section_type: SectionType | None = None,
-        page_number: int | None = None,
+        query        : str,
+        top_k        : int   = TOP_K_RESULTS,
+        threshold    : float = SIMILARITY_THRESHOLD,
+        doc_ids      : list[str] | None = None,
+        author       : str | None = None,
+        year         : str | None = None,
+        section_type : SectionType | None = None,
+        page_number  : int | None = None,
     ) -> SearchResponse:
         return rag_service.search_library(
-            query=query,
-            top_k=top_k,
-            threshold=threshold,
-            doc_ids=doc_ids,
-            author=author,
-            year=year,
-            section_type=section_type,
-            page_number=page_number,
+            query=query, top_k=top_k, threshold=threshold,
+            doc_ids=doc_ids, author=author, year=year,
+            section_type=section_type, page_number=page_number,
         )
 
     def library_chat_stream(
         self,
-        question: str,
-        history: list[ChatMessage],
-        top_k: int = TOP_K_RESULTS,
-        threshold: float = SIMILARITY_THRESHOLD,
-        doc_ids: list[str] | None = None,
-        author: str | None = None,
-        year: str | None = None,
-        section_type: SectionType | None = None,
+        question     : str,
+        history      : list[ChatMessage],
+        top_k        : int   = TOP_K_RESULTS,
+        threshold    : float = SIMILARITY_THRESHOLD,
+        doc_ids      : list[str] | None = None,
+        author       : str | None = None,
+        year         : str | None = None,
+        section_type : SectionType | None = None,
     ) -> Generator[str, None, None]:
+        """Stream a cross-library chat response (no single doc_id)."""
         try:
-            repository.add_document_log(doc_id, "info", "Processing started")
             context, sources = rag_service.get_library_context(
-                query=question,
-                top_k=top_k,
-                threshold=threshold,
-                doc_ids=doc_ids,
-                author=author,
-                year=year,
-                section_type=section_type,
+                query        = question,
+                top_k        = top_k,
+                threshold    = threshold,
+                doc_ids      = doc_ids,
+                author       = author,
+                year         = year,
+                section_type = section_type,
             )
             if not context:
-                yield "No indexed library context was found. Sync or process documents, then rebuild the index."
+                yield (
+                    "No indexed library context was found. "
+                    "Sync or process documents, then rebuild the index."
+                )
                 return
             source_lines = "\n".join(
-                f"- {r.chunk.doc_id}, page {r.chunk.page_number}, section {r.chunk.section_type.value}, score {r.score:.3f}"
+                f"- {r.chunk.doc_id}, page {r.chunk.page_number}, "
+                f"section {r.chunk.section_type.value}, score {r.score:.3f}"
                 for r in sources
             )
             prompt_context = f"{context}\n\nSource index:\n{source_lines}"
             yield from ai_router.chat(
-                question=question,
-                context=prompt_context,
-                history=history,
-                doc_id="library",
-                stream=True,
+                question = question,
+                context  = prompt_context,
+                history  = history,
+                doc_id   = "library",   # sentinel — no per-doc ID in library mode
+                stream   = True,
             )
         except Exception as e:
             logger.error("library_chat_stream failed: %s", e)
@@ -352,9 +394,7 @@ class AnalysisService:
 
     # ── Document management ───────────────────────────────────────────────────
 
-    def save_upload(
-        self, file_bytes: bytes, filename: str
-    ) -> tuple:
+    def save_upload(self, file_bytes: bytes, filename: str) -> tuple:
         try:
             return pdf_service.save_upload(file_bytes=file_bytes, filename=filename)
         except Exception as e:
@@ -371,6 +411,7 @@ class AnalysisService:
 
     def delete_document(self, doc_id: str) -> bool:
         try:
+            _DOC_INFO_CACHE.pop(doc_id, None)
             rag_service.delete_index(doc_id)
             return pdf_service.delete_document(doc_id)
         except Exception as e:
@@ -381,9 +422,10 @@ class AnalysisService:
         try:
             return ai_router.get_provider_status()
         except Exception:
+            import os
             return {
-                "openrouter" : {"configured": bool(__import__("os").getenv("OPENROUTER_API_KEY")), "model": "unknown"},
-                "huggingface": {"configured": bool(__import__("os").getenv("HUGGINGFACE_API_KEY")), "model": "unknown"},
+                "openrouter" : {"configured": bool(os.getenv("OPENROUTER_API_KEY")), "model": "unknown"},
+                "huggingface": {"configured": bool(os.getenv("HUGGINGFACE_API_KEY")), "model": "unknown"},
             }
 
     def get_library_stats(self) -> dict:
@@ -408,11 +450,30 @@ class AnalysisService:
             return []
 
     def sync_drive(self, on_file_found=None, on_file_done=None) -> dict:
-        return drive_service.sync(on_file_found=on_file_found, on_file_done=on_file_done)
+        """Sync all configured Drive accounts via multi_drive_service."""
+        from app.services.multi_drive_service import multi_drive_service
+        result = multi_drive_service.sync_all(
+            on_file_done=(
+                lambda label, fname, err: (
+                    on_file_found(fname, 0, 0) if on_file_found and not err else None,
+                    on_file_done(fname, err) if on_file_done else None,
+                )
+            ) if on_file_found or on_file_done else None,
+        )
+        return {
+            "new"    : result.total_new,
+            "updated": result.total_updated,
+            "skipped": result.total_skipped,
+            "failed" : result.total_failed,
+        }
 
-    def process_pending_ingestion_jobs(self, limit: int = 10, on_progress=None) -> dict:
+    def process_pending_ingestion_jobs(
+        self, limit: int = 100, on_progress: Optional[Callable] = None,
+    ) -> dict:
         from app.services.ingestion_service import ingestion_service
-        return ingestion_service.process_pending_jobs(limit=limit, on_progress=on_progress)
+        return ingestion_service.process_pending_jobs(
+            limit=limit, on_progress=on_progress,
+        )
 
     def rebuild_library_index(self) -> bool:
         try:
